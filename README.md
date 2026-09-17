@@ -1,194 +1,124 @@
-#  Android Webcam System
-Turn your Android phone into a high-quality webcam using a fully local, serverless architecture.
+# Android-cam — Android Webcam System
+
+Turn your Android phone into a high-quality PC webcam using a fully local, serverless architecture.
 
 Open-source (GPL-3.0)
-> [!NOTE]
-> ## Sponsorship Needed
->
-> Android Webcam Project currently supports Android and Windows.
-> I'd like to expand it to iOS and macOS, but Apple development
-> requires access to macOS hardware.
->
-> If you'd like to support the project, sponsorships will help
-> fund the hardware needed to develop and test Apple-platform
-> versions.
-
-## What's Included
-
-This is a **complete professional solution** with:
-
-- 📱 **Kotlin Mobile App** (Android for now)
-- 💻 **Tauri Desktop Client** (Windows/Mac/Linux)
-- 🔌 **USB Connection Support** (low latency, more stable)
-- 📡 **WiFi Connection Support** (wireless freedom)
-## Components
-
-### AWC — Desktop Client
-Tauri-based app that connects to your phone and outputs virtual webcam.
-
-### AWA — Android App
-Kotlin-based mobile app that acts as the streaming server.
-## Features
-
-### Mobile App
-- HD/FHD/4K resolution support (480p, 720p, 1080p, 4K)
-- Front/back camera switching
-- USB and WiFi connection modes
-- Real-time connection status
-- Low battery usage
-#### *(Planned)*
-- Adjustable FPS (15, 30, 60 fps) 
-
-### Desktop Client
-- Virtual webcam device (works with Zoom, Teams, Meet, OBS, etc.)
-- Clean, modern UI
-- Connection statistics
-
-### Connection Options
-- **USB Mode**: Lower latency, more stable, no WiFi needed
-- **WiFi Mode**: Wireless freedom, works anywhere
-
-## Prerequisites
-
-### Required
-- **PC**: Windows 10+, (*Planned for* macOS and Linux)
-- **Phone**: Android 8.0+
-
-### For Development
-- **Android Studio** (for Android builds)
-- **VS Code** (recommended editor)
-- Or your favourite software for developement
-
-
-## Using as Virtual Webcam
-
-The desktop client creates a virtual webcam that works with:
-
-- ✅ Zoom
-- ✅ Microsoft Teams
-- ✅ Google Meet
-- ✅ Discord
-- ✅ OBS Studio
-- ✅ Skype
-- ✅ Any app that uses webcams!
-
-### Windows Setup
-The virtual webcam should appear automatically in your video apps.
-
-<!-- ### Mac Setup
-Grant camera permissions in System Preferences → Security & Privacy
-
-### Linux Setup
-May require `v4l2loopback` kernel module:
-```bash
-sudo apt-get install v4l2loopback-dkms
-``` -->
-
-## Configuration
-
-### Change Resolution
-Edit in mobile app settings or in code:
-- 480p (640x480) - Low bandwidth
-- 720p (1280x720) - **Recommended for older phones**
-- 1080p (1920x1080) - High quality
-- 4K (3840x2160) - Maximum quality
-
-
-## Building for Production
-
-### Desktop Apps
-```bash
-cd desktop-client
-
-# Windows
-npm run build:win
-
-```
-
-## Troubleshooting
-
-### Connection Issues
-
-**"Can't connect -"**
-- Check firewall (allow port 8080 and 8554 - default ports)
-- Verify same WiFi network (for WiFi mode)
-- Check USB debugging (for USB mode)
-
-
-### Video Quality Issues
-
-- Lower resolution to 720p
-- Use USB instead of WiFi
-- Close other apps using camera
-- Use 5GHz WiFi if available
-
-## Advantages Over Other APPs
-
-| Feature | AWA | Other APPs  |
-|---------|--------------|----------|
-| Price | **Free** | Pay for HD and high resolutions |
-| Resolution | Up to 4K | 720p (free), 1080p (paid) |
-| Open Source (Customize as you want) | ✅ Yes | ❌ No |
-| USB Support | ✅ Yes | ✅ Yes |
-| WiFi Support | ✅ Yes | ✅ Yes |
-| Customizable | ✅ Full control | ❌ No |
-| Privacy | ✅ Self-hosted | ⚠️ |
-| No Ads | ✅ Yes | ❌ Has ads |
-
-## Contributing
-
-This is an open-source project! Contributions welcome:
-
-- 🐛 Report bugs
-- 💡 Suggest features
-- 🔧 Submit pull requests
-- 📖 Improve documentation
-- ⭐ Star the repository
-
-## License
-
-This project is licensed under the **GNU General Public License v3.0 (GPL-3.0)**.
-
-© 2026 Soubhagyajit Borah
-
-### What this means:
-
-* ✅ You can use, modify, and distribute this software
-* ✅ You can use it commercially
-* ⚠️ You must disclose source code if you distribute it
-* ⚠️ Any derivative work must also be licensed under GPL-3.0
-
-See the [LICENSE](LICENSE) file for full details.
-
-
-## Acknowledgments
-
-- Virtual camera powered by [Softcam](https://github.com/tshino/softcam) © tshino (MIT License)
-- Built with Kotlin, Electron.
-- Inspired by DroidCam and similar tools.
-- Made with ❤️ for the open-source community.
-
-## Roadmap
-
-- [ ] Audio streaming support
-- [ ] Recording functionality
-- [ ] Mobile app on app stores
-
-## Support
-
-Having issues? Found a bug?
-
-1. Create a new issue with details
-2. Join our community discussions
-
-> [!TIP]
-> **Enjoying Android Webcam Project?** ⭐
->
-> If this project helped you, please consider leaving a **GitHub Star** and sharing your feedback. Your support helps the project grow and motivates future development!
 
 ---
-> [!NOTE]
->*** *Virtual Webcam Device is back in v1.0.6. Enjoy AWP - Android Webcam Project!*
->*Virtual webcam device was not included in client version v1.0.5 as I was investing an issue. I released it in the next version with Virtual camera included. If you need the Virtual camera, please install client version v1.0.6*
 
-**Happy streaming! Made with ❤️ and ☕ by developers, for developers.**
+## 📦 What's Included
+
+This is a **complete professional solution** comprising:
+
+- 📱 **AWA (Android Webcam App)**: Kotlin-based mobile app that captures camera input and acts as the local streaming server (MJPEG / RTSP).
+- 💻 **AWC-GUI (Pure Rust Desktop Client)**: Ultra-fast, lightweight native client built with **`egui` / `eframe`** (no Node.js or web runtime required) with direct Windows DirectShow virtual webcam output.
+- 💻 **AWC-Tauri (Alternative Client)**: Tauri v2 + React 19 web-styled client.
+- 🔌 **USB Connection (ADB Forward)**: Low-latency, jitter-free, offline streaming.
+- 📡 **WiFi Connection**: Wireless freedom across the local network.
+
+---
+
+## 🚀 Key Features
+
+### Mobile App (`AWA`)
+- **Resolutions**: 480p, 720p, 1080p, and up to 4K UHD.
+- **Controls**: Front / back camera switching, torch/flash toggle, digital zoom, and exposure controls.
+- **Orientation**: Auto-sensor rotation with manual override (0°, 90°, 180°, 270°).
+- **Protocols**: MJPEG HTTP streaming and RTSP streaming.
+- **Battery Friendly**: Optimized pipeline with low battery draw.
+
+### Desktop Client (`AWC-GUI`)
+- **Pure Rust Native App**: Immediate-mode UI via `egui` with zero Node.js/web dependencies.
+- **Virtual Webcam Device**: Registers a native DirectShow camera via `softcam.dll` compatible with **Zoom, Microsoft Teams, Google Meet, Discord, OBS Studio, Skype**, etc.
+- **Silent Background Subprocesses**: Background ADB port forwarding and FFmpeg RTSP ingestion run completely silently without annoying console/terminal popups.
+- **Dual View**: Built-in desktop UI preview plus an embedded local HTTP dashboard (`http://127.0.0.1:8081`).
+
+---
+
+## 🛠️ Requirements & Prerequisites
+
+### PC (Desktop Client)
+- **OS**: Windows 10+ (64-bit)
+- **Rust Toolchain**: `cargo` & `rustc` (if building from source)
+- **Virtual Webcam Library**: `softcam.dll` (included in repository)
+- **ADB** (optional for USB mode, included in client)
+
+### Phone (Mobile App)
+- **OS**: Android 8.0 (Oreo) or higher
+- **Camera Permission**: Required for video streaming
+
+---
+
+## 🏃 Quick Start & Running
+
+### 1. Run the Native Desktop Client (`awc-gui`)
+No Node.js or npm needed!
+
+#### Run the Prebuilt Binary:
+```powershell
+# Run the standalone executable:
+.\CLIENT\awc-gui\target\release\awc-gui.exe
+```
+*(Ensure `softcam.dll` is located alongside `awc-gui.exe` so the virtual webcam registers automatically).*
+
+#### Or Build from Source:
+```powershell
+cd CLIENT\awc-gui
+cargo build --release
+```
+The compiled binary will be placed at `CLIENT/awc-gui/target/release/awc-gui.exe`.
+
+---
+
+### 2. Install the Android App (`AWA`)
+- Install the prebuilt APK from [`AWA/AWA-Android.Webcam.App.V1.0.3.apk`](AWA/AWA-Android.Webcam.App.V1.0.3.apk) on your Android device.
+- Or open the [`AWA`](AWA/) folder in **Android Studio** and click **Run**.
+
+---
+
+### 3. Connect Phone & PC
+
+#### Option A: USB Connection (Recommended for Lowest Latency)
+1. Enable **Developer Options** and **USB Debugging** on your phone.
+2. Connect your phone to your PC via USB cable.
+3. In `awc-gui`, click **Run ADB Forward** (sets up port forwards for `8080` and `8554`).
+4. Set Phone IP to `127.0.0.1` and click **Connect**.
+
+#### Option B: WiFi Connection
+1. Ensure both PC and phone are on the same WiFi network (5 GHz recommended).
+2. Note the IP displayed on your phone's screen (e.g. `192.168.1.50`).
+3. Enter that IP into `awc-gui` and click **Connect**.
+
+---
+
+## 🎥 Using as Virtual Webcam in Video Apps
+
+Once connected in `awc-gui`, your virtual camera device **"Softcam"** is active:
+1. Open Zoom, OBS Studio, Discord, or Microsoft Teams.
+2. Go to **Video / Camera Settings**.
+3. Select **Softcam** as your video input device.
+
+---
+
+## 📁 Repository Structure
+
+```
+Android-cam/
+├── AWA/                    # Android Mobile Application (Kotlin + Jetpack Compose)
+│   ├── app/                # App source code (CameraX, VideoStreamServer)
+│   └── *.apk               # Prebuilt APK binaries
+├── CLIENT/
+│   ├── awc-gui/            # Pure Rust + egui Desktop Client (recommended)
+│   │   ├── src/main.rs     # Stream ingestion, UI, and DirectShow bridge
+│   │   └── Cargo.toml
+│   └── tauri-client/       # Tauri v2 + React 19 desktop client
+├── assets/                 # Screenshots & visual guides
+└── README.md
+```
+
+---
+
+## 📄 License
+
+This project is licensed under the **GNU General Public License v3.0 (GPL-3.0)**.
+See the [LICENSE](LICENSE) file for complete details.
