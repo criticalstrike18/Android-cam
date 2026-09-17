@@ -1,0 +1,33 @@
+node_modules/
+signaling-server/
+mobile-app/
+dist/
+*.jks
+*.keystore
+App Key/
+release/
+setup.bat
+setup.sh
+thumb.png
+steps.md
+electron-app-old-arch/
+App-old
+APP
+.vs/
+.vscode/
+
+# Build artifacts
+target/
+**/target/
+**/build/
+.gradle/
+**/.gradle/
+*.log
+**/*.log
+
+# Video / temp media
+Adobe Premiere Pro Auto-Save
+Adobe Premiere Pro Audio Previews
+export-1.mp4
+2026-08-09 02-44-47.mp4
+Sample Video.prproj
