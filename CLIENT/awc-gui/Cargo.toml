@@ -20,7 +20,7 @@ serde_json = "1.0"
 virtualcam = "1.0.0"
 openh264 = "0.9.8"
 rusty_h265 = "0.6.0"
-windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_Dxgi", "Win32_Media_MediaFoundation", "Win32_System_Com", "Win32_System_Ole", "Win32_System_Variant"] }
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_Dxgi", "Win32_Media_MediaFoundation", "Win32_System_Com", "Win32_System_Console", "Win32_System_Ole", "Win32_System_Variant"] }
 
 # Dev-loop only: lighter debuginfo links noticeably faster, still debuggable.
 [profile.dev]

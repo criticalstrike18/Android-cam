@@ -1,8 +1,10 @@
 # Android Webcam Project — Current Status & Issues
 
-Last updated: 2026-10-01
+Last updated: 2026-10-01 (evening session: screen-off design, 1440p, headless, ADB fix)
 Test device: Galaxy M51 (SM-M515F, Snapdragon 730G), LineageOS 23.0 Unofficial (2025-12-25 build).
-Host connection: ADB over USB (forwards `tcp:8080` HTTP control, `tcp:8554` RTSP) + root via `su -c` (Magisk).
+Host connection: ADB over USB (forwards `tcp:8080` HTTP control, `tcp:8554` RTSP) + Wi-Fi ADB
+(`192.168.29.140:5555`, phone DHCP — may change) + root via `su -c` (Magisk). Phone currently
+**unplugged-capable**: USB and Wi-Fi transports stay attached simultaneously.
 
 ## 0. Product direction (agreed 2026-10-01)
 
@@ -33,9 +35,58 @@ Host connection: ADB over USB (forwards `tcp:8080` HTTP control, `tcp:8554` RTSP
   (`/settings`, `/features`, `/control`, `/ws`) verified.
 - **Desktop Rust client (`CLIENT/awc-gui`) works on software decode.** `test_live_4k` passes.
   MF video-processor rescale proven.
-- APK currently installed on the phone = **an older debug build**. It predates every fix in §2.
+- **Headless desktop mode works.** `awc-gui.exe --headless [--phone-ip ...] [--mode usb|wifi]
+  [--duration-secs N]` streams straight to the virtual camera with 5 s console status, no
+  window. Verified live over Wi-Fi: 727 vcam frames @ 30 fps in 25 s. Release binary at
+  `CLIENT/awc-gui/target/release/awc-gui.exe` (18.9 MB).
+- **ADB forwards are USB-pinned.** `run_adb_forward()` uses `adb -s <usb-serial>` so USB + Wi-Fi
+  transports can stay attached at once (bare `adb forward` fails then with "more than one
+  device" and the client sat offline while the phone streamed). Verified: forwards created as
+  `RZ8N90DNVXW tcp:8080/8554`, 567 vcam frames @ 30 fps over USB.
+- APK currently installed on the phone = **current debug build** (StreamService + back-cam
+  1440p force-enable included, installed over Wi-Fi ADB).
 
-## 2. Fixes landed 2026-10-01
+## 2. Fixes landed 2026-10-01 (evening session)
+
+### Background / screen-off design (Android) — the significant one
+
+Attempted true screen-off streaming (hold the session under a foreground service) and proved
+it impossible with the display-bound GL pipeline, then shipped the safe design:
+
+- `StreamService` (camera-type FGS, partial wake lock, return/stop notification) keeps the
+  process alive; the activity **always stops the session cleanly first** on background/screen-off
+  and restarts fresh on resume. Verified: sleep → wake → 111–112 frames, no wedge, ~12 s.
+- Evidence that holding is impossible: `OpenGlView.setForceRender(true, fps)` does not save the
+  session (surface is destroyed, not just un-vsynced) — 0 frames dark *and* after wake; the
+  half-dead session wedged CamX past in-app recovery (forced restart still 0 frames; only a
+  `cameraserver` kill cleared it). Clean-stop never wedges.
+- `screen_off_streaming` setting (default on, in `/settings` + `/control`): with it, backgrounding
+  parks under the service for instant resume; without it, bare release as before.
+- Stop-from-notification works via `StreamServiceStop` flag consumed on resume.
+- Side validation: user swiping the app away mid-session produced exactly the designed trace
+  (`pauseCamera` → `RtspServer: Server finished` → FGS up → HTTP alive → resume restarts).
+
+Files: `StreamService.kt` (new), `CameraView.kt` (pause/resume), `MainActivity.kt`
+(POST_NOTIFICATIONS), `AndroidManifest.xml` (service + permissions), `VideoStreamServer.kt`
+(setting plumbing).
+
+### Back-cam 1440p force-enable (Android)
+
+`updateSupportedResolutions` filters the `StreamResolution` enum against sensor JPEG sizes, which
+omit 2560x1440, so 2K was never offered. The enum already had `P1440`; it is now force-included
+for the back camera (same treatment 4K had). Encode size verified from SPS bits in the RTSP
+handshake (2560 wide; Samsung writes a loose `level_idc: 10` tag, decoders don't care). Verified
+over Wi-Fi: 70 + 67 frames stable. New `tests/test_live_wifi.rs` oracle (phone_ip =
+`192.168.29.140`) kept for all future Wi-Fi tests.
+
+### USB-pinned ADB forwards + headless CLI (desktop)
+
+See §1. Files: `src/platform/adb.rs` (`usb_device_serial`, `run_single_forward`),
+`src/main.rs` (`--headless`, `--phone-ip`, `--wifi-ip`, `--mode`, `--duration-secs`,
+console attach for release `windows_subsystem` builds, stdin-terminal guard so piped stdin
+can't EOF-kill a run), `Cargo.toml` (`Win32_System_Console`), `tests/test_live_wifi.rs` (new).
+
+## 2b. Fixes landed 2026-10-01 (earlier)
 
 ### Depacketizer correctness (desktop) — the significant one
 
@@ -114,6 +165,28 @@ more data" — which is why HEVC looked mysteriously broken. H.264 surfaced erro
 
 ## 3. Open issues (re-prioritised)
 
+13. **Resolution lost across background cycle (P1, new).** After a background → resume cycle the
+   phone restarts at 1280x720 even when 1440p was set (`resumeCamera` logs `streamRequested=false`).
+   Root cause not yet isolated (settings persistence vs restart path using defaults). Repro: set
+   1440p via `/control`, swipe app away, foreground, read `src=` — 720p.
+14. **Front camera not offered 1440p (P1, new).** Same filter as §2 back-cam fix, but the
+   force-include is back-only. Hardware encodes it (STATUS §5 measured front-1440p 118 frames;
+   `/control?resolution_str=2560x1440` already works on any camera via `fromString` — only the
+   advertised list + dropdowns hide it). Fix = extend force-include to front + SPS-verify.
+   Deliberately not done in this session; one-line change, needs a front-cam test run.
+15. **Slow connection establishment on mode switch (P1, new).** Worst-case stack: `run_adb_forward`
+   on the UI thread (window freeze) → WS 600 ms → HTTP fallback 500 ms → 200 ms sleeps →
+   auto-fallback needs 3 dead cycles (~4 s) → RTSP `TcpStream::connect` with no explicit timeout
+   (OS-dependent stall on dead IPs) + 500 ms retry sleeps → phone CamX bring-up ~5–12 s (irreducible)
+   with no staged UI feedback. Fix direction (auto-failover behaviour itself explicitly deferred):
+   forward off UI thread, `connect_timeout` on RTSP, reset failure counters on manual switch,
+   staged status (forwarding → handshake → keyframe → live). No changes to keyframe-at-live-edge,
+   stall watchdog, or retry budgets.
+16. **Minor UI issues, both apps (P2, new — symptoms wanted).** Candidates found in code review:
+   client mode/IP fields go stale after auto-failover (local `connection_mode`/`phone_ip_input` vs
+   shared state); app permission-denied text blames the camera even when only notifications were
+   denied; app IP label is `remember`-once (stale after Wi-Fi change); new `screen_off_streaming`
+   setting has no app Settings toggle (only via `/control`).
 1. **HEVC verification (P0) — needs hardware.** The RTP padding and fragment-loss fixes above are
    the leading candidate explanation for the HEVC failure, but this is **unverified**: it was
    reasoned from the spec and proven by unit tests, not observed on the wire. Run
@@ -165,9 +238,12 @@ more data" — which is why HEVC looked mysteriously broken. H.264 surfaced erro
 - Shipped mitigations: idle screen-dim (display is #1), 15 fps mode, 720p default.
 - Guidance: 720p15 = lowest-power usable; 1080p30 = sweet spot; 4K for short sessions (thermal
   throttle risk). ADB-forwarded USB traffic already avoids Wi-Fi for the desktop link.
-- Screen-off streaming needs a foreground service (not implemented — backgrounding releases the
-  camera by design, per Approach A).
-- True drain measurement still not run (phone is on USB trickle charge, which masks it).
+- Screen-off handling is now a foreground service with clean-stop + instant resume (see §2);
+  true screen-off *streaming* was proven impossible with display-bound GL (surface death + CamX
+  wedge past in-app recovery) and is not pursued. Display still dims to 0.02 after 15 s idle.
+- True drain measurement still not run (USB trickle charge masks it; kernel `current_now` reads
+  nonsense scale, `charge_counter` frozen at 7000000, capacity 100→99 over ~25 min of 1440p).
+  Re-run the drain window starting below ~80% if numbers are wanted.
 
 **Caveat worth deciding before release:** the black-preview incident was cured by rebooting the
 phone. A wedged `cameraserver` after long uptime is a real recurring condition, and the shipped
@@ -205,6 +281,7 @@ offload path is proven and available.
 adb forward tcp:8080 tcp:8080 && adb forward tcp:8554 tcp:8554   # re-add after reboot
 adb shell su -c 'kill $(pidof cameraserver)'                    # no-reboot camera reset
 curl "http://127.0.0.1:8080/control?camera=back&resolution_str=1280x720&video_codec=h264&fps=15"
+# Wi-Fi equivalents use http://192.168.29.140:8080 (phone DHCP — re-check with `adb shell ip route`)
 
 cargo test                       # unit tests only, no phone required
 cargo test --test test_mf_roundtrip                                # known-failing, see §3.2
@@ -214,7 +291,12 @@ cargo test -- --ignored --nocapture                                # ALL live te
 cargo test --test test_fps_probe -- --ignored --nocapture --test-threads=1  # wire fps + HEVC check
 cargo test --test test_mf_matrix -- --ignored --nocapture                   # SW perf matrix (~3 min)
 cargo test --test test_mf_pipe -- --nocapture                              # MF processor checks
+cargo test --test test_live_wifi -- --ignored --nocapture                  # Wi-Fi oracle (phone on 192.168.29.140)
 MF_ENABLE_HW=1 cargo test --test test_mf_debug -- --ignored --nocapture      # MF experiment (silent)
+
+# Headless desktop client (no GUI window):
+.\target\release\awc-gui.exe --headless --phone-ip 192.168.29.140   # Wi-Fi, unplugged
+.\target\release\awc-gui.exe --headless                             # USB (127.0.0.1 via forwards)
 ```
 
 The stream worker now logs a `health:` line whenever depacketizer or decoder damage changes. That

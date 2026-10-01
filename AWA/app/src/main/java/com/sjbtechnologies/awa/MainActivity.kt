@@ -144,8 +144,11 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 fun CameraScreen(camView: CameraViewModel = viewModel()) {
+    // POST_NOTIFICATIONS is needed on API 33+ for the screen-off streaming foreground
+    // service notification. Without it the service cannot promote to foreground.
     val hasPermission by checkPermissions(
-        Manifest.permission.CAMERA
+        Manifest.permission.CAMERA,
+        Manifest.permission.POST_NOTIFICATIONS
     )
 
     if (hasPermission) {

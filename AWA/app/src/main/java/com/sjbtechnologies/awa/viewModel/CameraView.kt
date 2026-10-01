@@ -21,6 +21,8 @@ import com.pedro.encoder.input.video.CameraHelper
 import com.pedro.library.view.OpenGlView
 import com.pedro.library.view.RenderErrorCallback
 import com.pedro.rtspserver.RtspServerCamera2
+import com.sjbtechnologies.awa.StreamService
+import com.sjbtechnologies.awa.StreamServiceStop
 import com.sjbtechnologies.awa.server.VideoStreamServer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -71,7 +73,13 @@ class CameraViewModel : ViewModel() {
         val exposureRange: IntRange = 0..0,
         val hasFlashUnit: Boolean = false,
         val rotationMode: String = "auto",
-        val videoCodec: String = "h264"
+        val videoCodec: String = "h264",
+        // Screen-off handling: when true, backgrounding or turning the screen off stops the
+        // session cleanly under a foreground service (instant resume, no cold start) instead of
+        // a bare release. Holding the session across screen-off is NOT done: the GL pipeline
+        // is display-bound and dies with the surface, wedging CamX past in-app recovery.
+        // Default on: this is a facecam, and the service path is strictly safer than bare stop.
+        val screenOffStreaming: Boolean = true
     )
 
     private var appContext: Context? = null
@@ -194,7 +202,8 @@ class CameraViewModel : ViewModel() {
                 rotation = effectiveRotation,
                 supported_resolutions = _supportedResolutions.value.map { "${it.size.width}x${it.size.height}" },
                 video_codec = s.videoCodec,
-                fps = s.fps
+                fps = s.fps,
+                screen_off_streaming = s.screenOffStreaming
             )
         }
 
@@ -223,6 +232,7 @@ class CameraViewModel : ViewModel() {
                 req.rotation?.let { setRotation(it) }
                 req.video_codec?.let { setVideoCodec(it) }
                 req.fps?.let { setFps(it) }
+                req.screen_off_streaming?.let { setScreenOffStreaming(it) }
             }
             null
         }
@@ -345,13 +355,24 @@ class CameraViewModel : ViewModel() {
 
     /** Release our camera when backgrounded so we never squat on (or wedge) the shared HAL. */
     fun pauseCamera() {
-        Log.d("AWA", "pauseCamera: app backgrounded, releasing our camera session")
+        val context = appContext
+        // Screen-off / background handling: ALWAYS stop the session cleanly first. The GL
+        // pipeline is display-bound: when the window hides (screen off OR app switch) the
+        // SurfaceView surface is destroyed and the encoder starves. Holding a half-dead
+        // session wedges CamX in a way that survives in-app restarts (verified: only a
+        // cameraserver reset cleared it). A clean stop never wedges; resume restarts fresh.
+        // The foreground service then keeps the process alive with a return/stop notification
+        // so resume is instant instead of a cold start.
+        Log.d("AWA", "pauseCamera: app backgrounded, stopping session cleanly")
         spsRetryJob?.cancel()
         spsRetryJob = null
         streamJob?.cancel()
         streamJob = null
         _isServerRunning.value = false
         _isPreviewActive.value = false
+        if (context != null && _settings.value.screenOffStreaming && streamRequested) {
+            StreamService.start(context)
+        }
         viewModelScope.launch(Dispatchers.Main) {
             streamLifecycleMutex.withLock {
                 stopRtspCamera()
@@ -360,9 +381,36 @@ class CameraViewModel : ViewModel() {
         }
     }
 
+    fun setScreenOffStreaming(enabled: Boolean) {
+        _settings.value = _settings.value.copy(screenOffStreaming = enabled)
+        if (!enabled) {
+            // Turning it off while backgrounded has no activity to return to; stop the service
+            // so it does not hold a session the user just opted out of.
+            appContext?.let { StreamService.stop(it) }
+        }
+        viewModelScope.launch {
+            VideoStreamServer.broadcastSettingsUpdate()
+        }
+    }
+
     /** Reacquire our camera when foregrounded if streaming was requested. */
     fun resumeCamera() {
+        // Stop-from-notification while the activity was dead lands here via the flag.
+        if (StreamServiceStop.consumeStop()) {
+            Log.d("AWA", "resumeCamera: stop was requested from notification, halting stream")
+            stopActiveStream()
+            appContext?.let { StreamService.stop(it) }
+            return
+        }
+        appContext?.let { StreamService.stop(it) }
         Log.d("AWA", "resumeCamera: app foregrounded, streamRequested=$streamRequested")
+        // pauseCamera always stops the session now (screen-off wedges CamX if held), so a
+        // live session here means it genuinely survived — otherwise restart fresh.
+        if (rtspCamera?.isStreaming == true) {
+            Log.d("AWA", "resumeCamera: session survived background, no restart needed")
+            _isServerRunning.value = true
+            return
+        }
         if (streamRequested && openGlView != null) {
             spsRetryCount = 0
             spsRetryJob?.cancel()
@@ -436,8 +484,10 @@ class CameraViewModel : ViewModel() {
                 val outputSizes = map?.getOutputSizes(android.graphics.ImageFormat.JPEG) ?: emptyArray()
 
                 val supported = StreamResolution.entries.filter { res ->
-                    if (res == StreamResolution.P2160 && targetFacing == CameraCharacteristics.LENS_FACING_BACK) {
-                        true // Hardware 4K UHD video encoding natively supported on rear camera
+                    if ((res == StreamResolution.P2160 || res == StreamResolution.P1440) && targetFacing == CameraCharacteristics.LENS_FACING_BACK) {
+                        true // 4K and 2K video encoding force-enabled on rear camera (SoC encoder
+                        // supports both; sensor 16:9 crops cover them even when absent from the
+                        // JPEG output-size list that backs the default filter)
                     } else {
                         outputSizes.any { size ->
                             size.width == res.size.width && size.height == res.size.height
@@ -733,6 +783,7 @@ class CameraViewModel : ViewModel() {
         spsRetryCount = 0
         streamJob?.cancel()
         streamJob = null
+        appContext?.let { StreamService.stop(it) }
         viewModelScope.launch(Dispatchers.Main) {
             streamLifecycleMutex.withLock {
                 stopRtspCamera()
@@ -923,6 +974,7 @@ class CameraViewModel : ViewModel() {
         streamJob?.cancel()
         streamJob = null
         orientationEventListener?.disable()
+        appContext?.let { StreamService.stop(it) }
         try {
             val context = appContext
             val callback = availabilityCallback

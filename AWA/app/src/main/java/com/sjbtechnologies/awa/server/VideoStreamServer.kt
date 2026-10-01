@@ -55,7 +55,8 @@ object VideoStreamServer {
         val rotation: String = "auto",
         val video_codec: String = "h264",
         val supported_resolutions: List<String> = emptyList(),
-        val fps: Int = 30
+        val fps: Int = 30,
+        val screen_off_streaming: Boolean = true
     )
 
     @Serializable
@@ -73,7 +74,8 @@ object VideoStreamServer {
         val stream_protocol: String? = null,
         val rotation: String? = null,
         val video_codec: String? = null,
-        val fps: Int? = null
+        val fps: Int? = null,
+        val screen_off_streaming: Boolean? = null
     )
 
     var featuresProvider: (() -> FeaturesResponse)? = null
@@ -250,7 +252,8 @@ object VideoStreamServer {
                         stream_protocol = params["stream_protocol"],
                         rotation = params["rotation"],
                         video_codec = params["video_codec"],
-                        fps = params["fps"]?.toIntOrNull()
+                        fps = params["fps"]?.toIntOrNull(),
+                        screen_off_streaming = params["screen_off_streaming"]?.toBooleanStrictOrNull()
                     )
 
                     val error = onSettingsUpdated?.invoke(update)
