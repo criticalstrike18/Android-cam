@@ -1,112 +1,185 @@
-use zune_jpeg::JpegDecoder;
-use image::imageops::FilterType;
-use image::RgbImage;
 use openh264::formats::YUVSource;
-use crate::core::config::{CAM_WIDTH, CAM_HEIGHT};
-use crate::core::state::PreviewFrame;
 
-/// Fast, cache-friendly zero-allocation conversion from I420 (planar YUV420p) to NV12 (semi-planar NV12)
-/// Directly formats video memory for OBS Virtual Camera and DirectShow/MediaFoundation.
-#[inline]
-pub fn i420_to_nv12(yuv: &impl YUVSource, out_nv12: &mut [u8]) {
-    let (w, h) = yuv.dimensions();
+/// Fast direct conversion and downscaling from I420 planes to NV12 destination.
+/// Uses precomputed coordinate lookup tables (LUT) to eliminate divisions from inner loops.
+/// Avoids generating intermediate full-resolution 4K buffers, saving >12MB memory allocations per frame.
+pub fn scale_i420_to_nv12(
+    yuv: &impl YUVSource,
+    dst: &mut Vec<u8>,
+    dst_w: u32,
+    dst_h: u32,
+) {
+    let (src_w, src_h) = yuv.dimensions();
     let (sy, su, sv) = yuv.strides();
     let y_src = yuv.y();
     let u_src = yuv.u();
     let v_src = yuv.v();
 
-    let y_len = w * h;
-    let (y_dst, uv_dst) = out_nv12.split_at_mut(y_len);
-
-    // 1. Copy Y plane
-    if sy == w {
-        y_dst[..y_len].copy_from_slice(&y_src[..y_len]);
-    } else {
-        for row in 0..h {
-            let src_off = row * sy;
-            let dst_off = row * w;
-            y_dst[dst_off..dst_off + w].copy_from_slice(&y_src[src_off..src_off + w]);
-        }
-    }
-
-    // 2. Interleave U and V planes (U0, V0, U1, V1, ...)
-    let uv_h = h / 2;
-    let uv_w = w / 2;
-    let mut dst_idx = 0;
-    for row in 0..uv_h {
-        let u_row = &u_src[row * su..row * su + uv_w];
-        let v_row = &v_src[row * sv..row * sv + uv_w];
-        for col in 0..uv_w {
-            uv_dst[dst_idx] = u_row[col];
-            uv_dst[dst_idx + 1] = v_row[col];
-            dst_idx += 2;
-        }
-    }
+    scale_raw_i420_to_nv12(
+        src_w,
+        src_h,
+        y_src,
+        sy,
+        u_src,
+        su,
+        v_src,
+        sv,
+        dst,
+        dst_w as usize,
+        dst_h as usize,
+    );
 }
 
-pub fn rgb_to_preview_rgba(rgb: &[u8], width: u32, height: u32) -> PreviewFrame {
-    let mut rgba = Vec::with_capacity((width * height * 4) as usize);
-    for chunk in rgb.chunks_exact(3) {
-        rgba.push(chunk[0]); // R
-        rgba.push(chunk[1]); // G
-        rgba.push(chunk[2]); // B
-        rgba.push(255);      // A
+/// Fast direct conversion from raw I420 slices into NV12 destination with optional downscaling.
+pub fn scale_raw_i420_to_nv12(
+    src_w: usize,
+    src_h: usize,
+    src_y: &[u8],
+    sy: usize,
+    src_u: &[u8],
+    su: usize,
+    src_v: &[u8],
+    sv: usize,
+    dst: &mut Vec<u8>,
+    dst_w: usize,
+    dst_h: usize,
+) {
+    let dst_y_len = dst_w * dst_h;
+    let dst_total = dst_y_len * 3 / 2;
+    if dst.len() != dst_total {
+        dst.resize(dst_total, 0);
     }
-    PreviewFrame {
-        width: width as usize,
-        height: height as usize,
-        rgba,
-    }
-}
 
-pub fn rgb_to_nv12(rgb: &[u8], width: u32, height: u32, out_nv12: &mut [u8]) {
-    let w = width as usize;
-    let h = height as usize;
-    let y_len = w * h;
-    let (y_dst, uv_dst) = out_nv12.split_at_mut(y_len);
+    let (dst_y, dst_uv) = dst.split_at_mut(dst_y_len);
 
-    for row in 0..h {
-        for col in 0..w {
-            let idx = (row * w + col) * 3;
-            let r = rgb[idx] as i32;
-            let g = rgb[idx + 1] as i32;
-            let b = rgb[idx + 2] as i32;
-
-            let y = ((66 * r + 129 * g + 25 * b + 128) >> 8) + 16;
-            y_dst[row * w + col] = y.clamp(0, 255) as u8;
-
-            if row % 2 == 0 && col % 2 == 0 {
-                let u = ((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128;
-                let v = ((112 * r - 94 * g - 18 * b + 128) >> 8) + 128;
-                let uv_idx = (row / 2) * w + col;
-                uv_dst[uv_idx] = u.clamp(0, 255) as u8;
-                uv_dst[uv_idx + 1] = v.clamp(0, 255) as u8;
+    if src_w == dst_w && src_h == dst_h {
+        // Fast 1:1 path
+        if sy == src_w {
+            dst_y[..dst_y_len].copy_from_slice(&src_y[..dst_y_len]);
+        } else {
+            for row in 0..dst_h {
+                let s_off = row * sy;
+                let d_off = row * dst_w;
+                dst_y[d_off..d_off + dst_w].copy_from_slice(&src_y[s_off..s_off + dst_w]);
             }
         }
+
+        let uv_h = dst_h / 2;
+        let uv_w = dst_w / 2;
+        let mut d_idx = 0;
+        for row in 0..uv_h {
+            let u_row = &src_u[row * su..row * su + uv_w];
+            let v_row = &src_v[row * sv..row * sv + uv_w];
+            for col in 0..uv_w {
+                dst_uv[d_idx] = u_row[col];
+                dst_uv[d_idx + 1] = v_row[col];
+                d_idx += 2;
+            }
+        }
+        return;
+    }
+
+    // Precompute X-coordinate LUTs once per frame to eliminate all divisions from the inner loops
+    let mut x_lut_y = Vec::with_capacity(dst_w);
+    for dx in 0..dst_w {
+        x_lut_y.push((dx * src_w) / dst_w);
+    }
+
+    let dst_uv_w = dst_w / 2;
+    let src_uv_w = src_w / 2;
+    let mut x_lut_uv = Vec::with_capacity(dst_uv_w);
+    for dx in 0..dst_uv_w {
+        x_lut_uv.push((dx * src_uv_w) / dst_uv_w);
+    }
+
+    // Scale Y plane
+    for dy in 0..dst_h {
+        let sy_idx = (dy * src_h) / dst_h;
+        let src_row = &src_y[sy_idx * sy..(sy_idx + 1) * sy];
+        let dst_row = &mut dst_y[dy * dst_w..(dy + 1) * dst_w];
+        for dx in 0..dst_w {
+            dst_row[dx] = src_row[x_lut_y[dx]];
+        }
+    }
+
+    // Scale & Interleave UV plane
+    let dst_uv_h = dst_h / 2;
+    let src_uv_h = src_h / 2;
+    for dy in 0..dst_uv_h {
+        let sy_idx = (dy * src_uv_h) / dst_uv_h;
+        let u_row = &src_u[sy_idx * su..(sy_idx + 1) * su];
+        let v_row = &src_v[sy_idx * sv..(sy_idx + 1) * sv];
+        let dst_row = &mut dst_uv[dy * dst_w..(dy + 1) * dst_w];
+        for dx in 0..dst_uv_w {
+            let sx = x_lut_uv[dx];
+            dst_row[dx * 2] = u_row[sx];
+            dst_row[dx * 2 + 1] = v_row[sx];
+        }
     }
 }
 
-pub fn decode_jpeg_to_rgb(jpeg_bytes: &[u8], out_rgb: &mut Vec<u8>, out_dims: &mut (u32, u32)) -> bool {
-    let mut decoder = JpegDecoder::new(jpeg_bytes);
-    let Ok(pixels) = decoder.decode() else {
-        return false;
-    };
-
-    let Some((dec_w, dec_h)) = decoder.dimensions() else {
-        return false;
-    };
-    *out_dims = (dec_w as u32, dec_h as u32);
-
-    if dec_w as u32 == CAM_WIDTH && dec_h as u32 == CAM_HEIGHT {
-        *out_rgb = pixels;
-        return true;
+/// Fallback scale NV12 to NV12 if needed.
+#[allow(dead_code)]
+pub fn scale_nv12(
+    src: &[u8],
+    src_w: u32,
+    src_h: u32,
+    dst: &mut Vec<u8>,
+    dst_w: u32,
+    dst_h: u32,
+) {
+    let dst_y_len = (dst_w * dst_h) as usize;
+    let dst_total = dst_y_len * 3 / 2;
+    if dst.len() != dst_total {
+        dst.resize(dst_total, 0);
     }
 
-    if let Some(img) = RgbImage::from_raw(dec_w as u32, dec_h as u32, pixels) {
-        let resized = image::imageops::resize(&img, CAM_WIDTH, CAM_HEIGHT, FilterType::Nearest);
-        *out_rgb = resized.into_raw();
-        true
-    } else {
-        false
+    let src_w = src_w as usize;
+    let src_h = src_h as usize;
+    let dst_w = dst_w as usize;
+    let dst_h = dst_h as usize;
+
+    let src_y_len = src_w * src_h;
+    if src.len() < src_y_len * 3 / 2 {
+        return;
+    }
+    let src_y = &src[..src_y_len];
+    let src_uv = &src[src_y_len..];
+
+    let (dst_y, dst_uv) = dst.split_at_mut(dst_y_len);
+
+    let mut x_lut_y = Vec::with_capacity(dst_w);
+    for dx in 0..dst_w {
+        x_lut_y.push((dx * src_w) / dst_w);
+    }
+
+    for dy in 0..dst_h {
+        let sy = (dy * src_h) / dst_h;
+        let src_row = &src_y[sy * src_w..(sy + 1) * src_w];
+        let dst_row = &mut dst_y[dy * dst_w..(dy + 1) * dst_w];
+        for dx in 0..dst_w {
+            dst_row[dx] = src_row[x_lut_y[dx]];
+        }
+    }
+
+    let src_uv_h = src_h / 2;
+    let src_uv_w = src_w / 2;
+    let dst_uv_h = dst_h / 2;
+    let dst_uv_w = dst_w / 2;
+
+    let mut x_lut_uv = Vec::with_capacity(dst_uv_w);
+    for dx in 0..dst_uv_w {
+        x_lut_uv.push((dx * src_uv_w) / dst_uv_w);
+    }
+
+    for dy in 0..dst_uv_h {
+        let sy = (dy * src_uv_h) / dst_uv_h;
+        let src_row = &src_uv[sy * src_w..(sy + 1) * src_w];
+        let dst_row = &mut dst_uv[dy * dst_w..(dy + 1) * dst_w];
+        for dx in 0..dst_uv_w {
+            let sx = x_lut_uv[dx];
+            dst_row[dx * 2] = src_row[sx * 2];
+            dst_row[dx * 2 + 1] = src_row[sx * 2 + 1];
+        }
     }
 }

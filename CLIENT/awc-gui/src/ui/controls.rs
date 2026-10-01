@@ -6,6 +6,23 @@ use crate::core::state::SharedAppState;
 use crate::platform::adb::run_adb_forward;
 use super::theme::{card, colors, section_header};
 
+fn format_resolution_label(res: &str) -> String {
+    let clean = res.trim();
+    if clean.contains("3840x2160") {
+        "3840x2160 (4K UHD)".to_string()
+    } else if clean.contains("2560x1440") {
+        "2560x1440 (2K QHD)".to_string()
+    } else if clean.contains("1920x1080") {
+        "1920x1080 (1080p FHD)".to_string()
+    } else if clean.contains("1280x720") {
+        "1280x720 (720p HD)".to_string()
+    } else if clean.contains("640x480") {
+        "640x480 (480p SD)".to_string()
+    } else {
+        clean.to_string()
+    }
+}
+
 fn segmented_btn(ui: &mut egui::Ui, active: bool, label: &str) -> bool {
     let (bg, fg, stroke) = if active {
         (
@@ -192,7 +209,7 @@ pub fn render_controls(
         ui.label(egui::RichText::new("Resolution").size(12.0).color(colors::TEXT_MUTED));
         egui::ComboBox::from_id_salt("res_combo")
             .selected_text(
-                egui::RichText::new(&current_state.resolution)
+                egui::RichText::new(format_resolution_label(&current_state.resolution))
                     .size(12.0)
                     .color(colors::TEXT_PRIMARY),
             )
@@ -200,7 +217,8 @@ pub fn render_controls(
             .show_ui(ui, |ui| {
                 for res in &current_state.supported_resolutions {
                     let is_selected = res == &current_state.resolution;
-                    if ui.selectable_label(is_selected, res).clicked() && !is_selected {
+                    let display_label = format_resolution_label(res);
+                    if ui.selectable_label(is_selected, &display_label).clicked() && !is_selected {
                         let mut s = state_arc.lock().unwrap();
                         s.pending_command = Some(format!("resolution_str={}", res));
                     }
@@ -294,43 +312,25 @@ pub fn render_controls(
     });
 
     // -------------------------------------------------------------
-    // CARD 3: STREAM & ORIENTATION
+    // CARD 3: HARDWARE VIDEO CODEC & ORIENTATION
     // -------------------------------------------------------------
     card(ui, |ui| {
-        section_header(ui, "⚙", "STREAM & ROTATION");
+        section_header(ui, "⚙", "HARDWARE STREAM & ROTATION");
         ui.add_space(4.0);
 
-        // Protocol Selection
-        ui.label(egui::RichText::new("Protocol").size(12.0).color(colors::TEXT_MUTED));
-        egui::ComboBox::from_id_salt("codec_combo")
-            .selected_text(
-                egui::RichText::new(if current_state.codec == "rtsp" {
-                    "RTSP (H.264 Hardware)"
-                } else {
-                    "MJPEG (Direct HTTP)"
-                })
-                .size(12.0)
-                .color(colors::TEXT_PRIMARY),
-            )
-            .width(ui.available_width() - 8.0)
-            .show_ui(ui, |ui| {
-                if ui
-                    .selectable_label(current_state.codec == "rtsp", "RTSP (H.264 Hardware)")
-                    .clicked()
-                {
+        // Hardware Compression Codec Selection
+        ui.label(egui::RichText::new("Hardware Video Codec").size(12.0).color(colors::TEXT_MUTED));
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing = Vec2::new(4.0, 0.0);
+            for (codec_key, label) in [("h265", "H.265 (HEVC)"), ("h264", "H.264 (AVC)")] {
+                let is_sel = current_state.video_codec == codec_key;
+                if segmented_btn(ui, is_sel, label) && !is_sel {
                     let mut s = state_arc.lock().unwrap();
-                    s.codec = "rtsp".to_string();
-                    s.pending_command = Some("stream_protocol=rtsp".to_string());
+                    s.video_codec = codec_key.to_string();
+                    s.pending_command = Some(format!("video_codec={}", codec_key));
                 }
-                if ui
-                    .selectable_label(current_state.codec == "mjpeg", "MJPEG (Direct HTTP)")
-                    .clicked()
-                {
-                    let mut s = state_arc.lock().unwrap();
-                    s.codec = "mjpeg".to_string();
-                    s.pending_command = Some("stream_protocol=mjpeg".to_string());
-                }
-            });
+            }
+        });
 
         ui.add_space(8.0);
 

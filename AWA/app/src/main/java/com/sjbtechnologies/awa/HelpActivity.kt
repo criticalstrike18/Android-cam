@@ -74,14 +74,6 @@ fun HelpContent(modifier: Modifier = Modifier) {
         item {
             ApiEndpointCard(
                 method = "GET",
-                path = "/video",
-                description = "MJPEG stream."
-            )
-        }
-
-        item {
-            ApiEndpointCard(
-                method = "GET",
                 path = "/features",
                 description = "Get available features.",
                 exampleJson = """
@@ -90,7 +82,7 @@ fun HelpContent(modifier: Modifier = Modifier) {
     "manual_focus": true,
     "exposure_lower": -20,
     "exposure_upper": 20,
-    "stream_protocol": "MJPEG"
+    "stream_protocol": "rtsp"
 }
                 """.trimIndent()
             )
@@ -165,7 +157,7 @@ fun HelpContent(modifier: Modifier = Modifier) {
                 Column(modifier = Modifier.padding(16.dp)) {
                     Text(text = "Note:", fontWeight = FontWeight.Bold)
                     Text(
-                        text = "Zoom is not supported yet.",
+                        text = "Video is RTSP only (port 8554); there is no MJPEG endpoint. Zoom is supported (1.0x-5.0x).",
                         style = MaterialTheme.typography.bodyMedium,
                         modifier = Modifier.padding(vertical = 4.dp)
                     )

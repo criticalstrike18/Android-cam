@@ -25,6 +25,12 @@ target/
 *.log
 **/*.log
 
+# Extracted dependency AAR/JAR contents (javap/decompile scratch dumps)
+**/classes.jar
+**/META-INF/
+AWA/com/
+AWA/org/
+
 # Video / temp media
 Adobe Premiere Pro Auto-Save
 Adobe Premiere Pro Audio Previews

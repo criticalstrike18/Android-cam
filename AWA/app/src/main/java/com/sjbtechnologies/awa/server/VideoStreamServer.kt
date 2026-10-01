@@ -1,7 +1,6 @@
 package com.sjbtechnologies.awa.server
 
 import android.util.Log
-import com.sjbtechnologies.awa.viewModel.CameraViewModel
 import io.ktor.http.*
 import io.ktor.serialization.kotlinx.json.json
 import io.ktor.server.application.*
@@ -15,14 +14,8 @@ import io.ktor.websocket.*
 import io.ktor.server.request.receive
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.channels.BufferOverflow
-import kotlinx.coroutines.channels.consumeEach
-import kotlinx.coroutines.flow.MutableSharedFlow
-import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
-import java.io.OutputStream
 import kotlin.time.Duration.Companion.seconds
 import java.util.concurrent.CopyOnWriteArrayList
 
@@ -37,11 +30,13 @@ object VideoStreamServer {
         val has_zoom: Boolean,
         val zoom_max: Float,
         val zoom_min: Float,
-        val stream_protocol: String,
+        val stream_protocol: String = "rtsp",
         val server_port: Int? = null,
         val rtsp_port: Int? = null,
         val rotation_options: List<String> = listOf("auto", "0", "90", "180", "270"),
-        val current_rotation: String = "auto"
+        val current_rotation: String = "auto",
+        val available_codecs: List<String> = listOf("h264", "h265"),
+        val available_fps: List<Int> = listOf(15, 30)
     )
 
     @Serializable
@@ -53,12 +48,14 @@ object VideoStreamServer {
         val focus_distance: Float,
         val exposure_index: Int,
         val autofocus: Boolean? = null,
-        val stream_quality: Int,
+        val stream_quality: Int = 80,
         val flash: Boolean = false,
         val has_flash_unit: Boolean? = null,
-        val stream_protocol: String = "mjpeg",
+        val stream_protocol: String = "rtsp",
         val rotation: String = "auto",
-        val supported_resolutions: List<String> = emptyList()
+        val video_codec: String = "h264",
+        val supported_resolutions: List<String> = emptyList(),
+        val fps: Int = 30
     )
 
     @Serializable
@@ -74,34 +71,23 @@ object VideoStreamServer {
         val camera: String? = null,
         val stream_quality: Int? = null,
         val stream_protocol: String? = null,
-        val rotation: String? = null
+        val rotation: String? = null,
+        val video_codec: String? = null,
+        val fps: Int? = null
     )
 
     var featuresProvider: (() -> FeaturesResponse)? = null
     var settingsProvider: (() -> SettingsResponse)? = null
 
-    // Returns null on success, or an error message String if rejected
-    var onSettingsUpdated: ((SettingsUpdateRequest) -> String?)? = null
+    // Suspends until the change has actually been applied, so the response and the
+    // broadcast that follow reflect the new state. Returns null on success, or an
+    // error message String if rejected.
+    var onSettingsUpdated: (suspend (SettingsUpdateRequest) -> String?)? = null
 
     private var server: EmbeddedServer<*, *>? = null
-    @Volatile
-    var latestFrame: ByteArray? = null
-
-    private val mjpegFrameFlow = MutableSharedFlow<ByteArray>(
-        replay = 1,
-        extraBufferCapacity = 1,
-        onBufferOverflow = BufferOverflow.DROP_OLDEST
-    )
-
-    fun pushMjpegFrame(frame: ByteArray) {
-        latestFrame = frame
-        mjpegFrameFlow.tryEmit(frame)
-    }
 
     var onUserConnected: (() -> Unit)? = null
     var onUserDisconnected: (() -> Unit)? = null
-    var onVideoViewerConnected: (() -> Unit)? = null
-    var onVideoViewerDisconnected: (() -> Unit)? = null
     var onServerStateChanged: ((Boolean) -> Unit)? = null
 
     private val activeWsSessions = CopyOnWriteArrayList<DefaultWebSocketSession>()
@@ -194,20 +180,6 @@ object VideoStreamServer {
                     }
                 }
 
-                get("/video") {
-                    onVideoViewerConnected?.invoke()
-                    try {
-                        call.respondOutputStream(
-                            contentType = ContentType.parse("multipart/x-mixed-replace; boundary=--frame"),
-                            status = HttpStatusCode.OK
-                        ) {
-                            streamMjpeg(this)
-                        }
-                    } finally {
-                        onVideoViewerDisconnected?.invoke()
-                    }
-                }
-
                 get("/features") {
                     val response = featuresProvider?.invoke() ?: FeaturesResponse(
                         resolutions = listOf("640x480", "1280x720", "1920x1080"),
@@ -217,7 +189,7 @@ object VideoStreamServer {
                         has_zoom = false,
                         zoom_max = 1.0f,
                         zoom_min = 1.0f,
-                        stream_protocol = "mjpeg",
+                        stream_protocol = "rtsp",
                         server_port = 8080,
                         rtsp_port = 8554
                     )
@@ -236,8 +208,10 @@ object VideoStreamServer {
                         focus_distance = 0f,
                         has_flash_unit = false,
                         stream_quality = 80,
-                        stream_protocol = "mjpeg",
-                        rotation = "auto"
+                        stream_protocol = "rtsp",
+                        rotation = "auto",
+                        video_codec = "h264",
+                        fps = 30
                     )
                     call.respond(response)
                 }
@@ -274,7 +248,9 @@ object VideoStreamServer {
                         switchCamera = if (params.contains("switch_camera") || params["switchCamera"] == "true") true else null,
                         stream_quality = params["stream_quality"]?.toIntOrNull() ?: 80,
                         stream_protocol = params["stream_protocol"],
-                        rotation = params["rotation"]
+                        rotation = params["rotation"],
+                        video_codec = params["video_codec"],
+                        fps = params["fps"]?.toIntOrNull()
                     )
 
                     val error = onSettingsUpdated?.invoke(update)
@@ -285,7 +261,8 @@ object VideoStreamServer {
                         val response = settingsProvider?.invoke() ?: SettingsResponse(
                             focus_mode = 0, focus_distance = 0f, exposure_index = 1,
                             zoom = 1.0f, stream_quality = 80, resolution_str = "1280x720",
-                            camera = "back", stream_protocol = "mjpeg", rotation = "auto"
+                            camera = "back", stream_protocol = "rtsp", rotation = "auto",
+                            video_codec = "h264", fps = 30
                         )
                         call.respond(HttpStatusCode.OK, response)
                     }
@@ -294,27 +271,8 @@ object VideoStreamServer {
                 get("/help"){
                     call.respondRedirect("/static/help.html")
                 }
-
             }
         }.start(wait = false)
-    }
-
-    private suspend fun streamMjpeg(outputStream: OutputStream) {
-        val boundary = "\r\n--frame\r\n"
-        try {
-            mjpegFrameFlow.collect { frame ->
-                withContext(Dispatchers.IO) {
-                    outputStream.write(boundary.toByteArray())
-                    outputStream.write("Content-Type: image/jpeg\r\n".toByteArray())
-                    outputStream.write("Content-Length: ${frame.size}\r\n\r\n".toByteArray())
-                    outputStream.write(frame)
-                    outputStream.write("\r\n".toByteArray())
-                    outputStream.flush()
-                }
-            }
-        } catch (_: Exception) {
-            // Client disconnected
-        }
     }
 
     fun stop() {

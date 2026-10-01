@@ -1,5 +1,6 @@
 use eframe::egui::{self, Color32, Margin, Rounding, Stroke, Vec2};
 
+#[allow(dead_code)]
 pub mod colors {
     use super::Color32;
 

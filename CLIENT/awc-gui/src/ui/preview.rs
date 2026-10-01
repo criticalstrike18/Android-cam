@@ -44,11 +44,11 @@ pub fn render_preview(
     let offset_x = ((available_size.x - video_w) / 2.0).max(0.0);
     let offset_y = ((available_size.y - video_h) / 2.0).max(0.0);
 
-    ui.allocate_ui_at_rect(
-        egui::Rect::from_min_size(
+    ui.allocate_new_ui(
+        egui::UiBuilder::new().max_rect(egui::Rect::from_min_size(
             ui.min_rect().min + egui::vec2(offset_x, offset_y),
             video_size,
-        ),
+        )),
         |ui| {
             let (rect, _response) = ui.allocate_exact_size(video_size, egui::Sense::hover());
 
@@ -92,10 +92,26 @@ pub fn render_preview(
                     Stroke::new(1.0_f32, Color32::from_white_alpha(30)),
                 );
 
-                let hud_text = format!(
-                    "Live Feed: {}x{}  •  Virtual Cam: 1280x720  •  {:.1} FPS",
-                    state.source_w, state.source_h, state.fps
-                );
+                let res_tag = match (state.source_w, state.source_h) {
+                    (3840, 2160) | (2160, 3840) => "4K UHD",
+                    (2560, 1440) | (1440, 2560) => "2K QHD",
+                    (1920, 1080) | (1080, 1920) => "1080p FHD",
+                    (1280, 720) | (720, 1280) => "720p HD",
+                    (640, 480) | (480, 640) => "480p SD",
+                    _ => "",
+                };
+                let hud_text = if res_tag.is_empty() {
+                    format!(
+                        "Live Feed: {}x{}  \u{2022}  Virtual Cam: Active  \u{2022}  {:.1} FPS",
+                        state.source_w, state.source_h, state.fps
+                    )
+                } else {
+                    format!(
+                        "Live Feed: {}x{} ({})  \u{2022}  Virtual Cam: Active  \u{2022}  {:.1} FPS",
+                        state.source_w, state.source_h, res_tag, state.fps
+                    )
+                };
+
                 ui.painter().text(
                     hud_rect.center(),
                     egui::Align2::CENTER_CENTER,

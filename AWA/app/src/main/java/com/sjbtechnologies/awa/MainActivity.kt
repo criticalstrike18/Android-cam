@@ -5,9 +5,9 @@ import android.app.Activity
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.content.res.Configuration
+import android.os.Build
 import android.os.Bundle
 import android.util.Log
-import android.view.TextureView
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -53,7 +53,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
-import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.SmallFloatingActionButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -61,13 +60,11 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalConfiguration
@@ -82,7 +79,7 @@ import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
-import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.sjbtechnologies.awa.ui.theme.AWATheme
 import com.sjbtechnologies.awa.ui.components.Preview
@@ -93,7 +90,17 @@ import java.net.NetworkInterface
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            setShowWhenLocked(true)
+            setTurnScreenOn(true)
+        } else {
+            @Suppress("DEPRECATION")
+            window.addFlags(
+                WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
+            )
+        }
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR
         WindowCompat.setDecorFitsSystemWindows(window, false)
         val controller = WindowInsetsControllerCompat(window, window.decorView)
@@ -104,26 +111,46 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             AWATheme {
-                Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
+                Scaffold(modifier = Modifier.fillMaxSize()) { _ ->
                     CameraScreen()
                 }
             }
+        }
+    }
+
+    private fun activityViewModel(): CameraViewModel =
+        ViewModelProvider(this)[CameraViewModel::class.java]
+
+    override fun onPause() {
+        super.onPause()
+        // Release ONLY our camera session when backgrounded — other apps are untouched,
+        // and we stop squatting on (or wedging) the shared HAL while invisible.
+        try {
+            activityViewModel().pauseCamera()
+        } catch (e: Exception) {
+            Log.e("AWA", "pauseCamera failed", e)
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        try {
+            activityViewModel().resumeCamera()
+        } catch (e: Exception) {
+            Log.e("AWA", "resumeCamera failed", e)
         }
     }
 }
 
 @Composable
 fun CameraScreen(camView: CameraViewModel = viewModel()) {
-    // Check for Camera permission needed for video streaming
     val hasPermission by checkPermissions(
         Manifest.permission.CAMERA
     )
 
     if (hasPermission) {
-        // Render Camera Preview / Streaming controls here
         CameraContent(camView)
     } else {
-        // Fallback UI shown while asking or if user denies permissions
         Box(
             modifier = Modifier.fillMaxSize(),
             contentAlignment = Alignment.Center
@@ -136,15 +163,10 @@ fun CameraScreen(camView: CameraViewModel = viewModel()) {
 @Composable
 private fun CameraContent(camView: CameraViewModel) {
     val isServerRunning by camView.isServerRunning
-    val isPreviewActive by camView.isPreviewActive
-    val showLocalPreview by camView.showLocalPreview
-
     var isSettingsOpen by remember { mutableStateOf(false) }
 
     val context = LocalContext.current
-    val activity = context as? Activity
 
-    val streamMode by camView.streamMode
     var showExposureSlider by remember { mutableStateOf(false) }
 
     val settings by camView.settings
@@ -154,143 +176,155 @@ private fun CameraContent(camView: CameraViewModel) {
     val focusDistance = settings.focusDistance
     var showFocusSlider by remember { mutableStateOf(false) }
     val ipAddress by remember { mutableStateOf(getLocalIpAddress()) }
+    val lastInteractionMs by camView.lastInteractionMs
+    var screenDimmed by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         camView.initialize(context)
     }
 
-    // OLED power-saving & thermal control: Dim backlight when preview is hidden
-    LaunchedEffect(showLocalPreview) {
-        activity?.window?.let { window ->
-            val layoutParams = window.attributes
-            layoutParams.screenBrightness = if (showLocalPreview) {
-                WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
-            } else {
-                0.01f
+    // Battery saver: dim the backlight to near-off after 15s without interaction
+    // while streaming (display is the #1 drain; streaming needs no screen).
+    // Any tap wakes it back via notifyScreenTapped -> interaction tick.
+    LaunchedEffect(isServerRunning, lastInteractionMs) {
+        val activity = context as? Activity
+        if (activity == null) return@LaunchedEffect
+        while (true) {
+            val idleMs = android.os.SystemClock.uptimeMillis() - camView.lastInteractionMs.value
+            val shouldDim = isServerRunning && idleMs > 15_000
+            if (shouldDim != screenDimmed) {
+                screenDimmed = shouldDim
+                try {
+                    activity.runOnUiThread {
+                        val lp = activity.window.attributes
+                        lp.screenBrightness = if (shouldDim) 0.02f else -1f
+                        activity.window.attributes = lp
+                    }
+                    Log.d("AWA", if (shouldDim) "Screen dimmed for battery saving" else "Screen brightness restored")
+                } catch (e: Exception) {
+                    Log.e("AWA", "Failed to set screen brightness", e)
+                }
             }
-            window.attributes = layoutParams
+            kotlinx.coroutines.delay(2000)
         }
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
-
-        // Camera Preview & Touch-to-Wake
+        // Fullscreen Camera Preview
         Box(
             modifier = Modifier
                 .fillMaxSize()
                 .pointerInput(Unit) {
-                    detectTapGestures { offset ->
+                    detectTapGestures {
                         camView.notifyScreenTapped()
-                        camView.tapToFocus(
-                            x = offset.x,
-                            y = offset.y,
-                            width = size.width.toFloat(),
-                            height = size.height.toFloat()
-                        )
                     }
                 }
         ) {
             Preview(
-                camView,
-                Modifier
-                    .fillMaxSize()
-                    .alpha(if (showLocalPreview) 1f else 0f)
+                viewModel = camView,
+                modifier = Modifier.fillMaxSize()
             )
-
-            // Pitch Black Canvas to turn off OLED pixels completely
-            if (!showLocalPreview) {
-                Box(
-                    Modifier
-                        .fillMaxSize()
-                        .background(Color.Black)
-                )
-            }
         }
 
-        // Top Controls (Only visible when preview active)
-        if (showLocalPreview) {
+        // Top Controls Bar
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .align(Alignment.TopCenter)
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
             Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .align(Alignment.TopCenter)
-                    .padding(horizontal = 16.dp),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
+                horizontalArrangement = Arrangement.spacedBy(16.dp)
             ) {
-                Row(
-                    modifier = Modifier,
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(16.dp)
-                ) {
-                    Box {
-                        TextButton(
-                            onClick = {
-                                showExposureSlider = !showExposureSlider
-                                Log.d("AWA", "Exposure button tapped")
-                            }
-                        ) {
-                            Text("EXP")
+                // Exposure control
+                Box {
+                    TextButton(
+                        onClick = {
+                            showExposureSlider = !showExposureSlider
+                            showFocusSlider = false
                         }
+                    ) {
+                        Text("EXP")
+                    }
 
-                        if (showExposureSlider) {
-                            Popup(alignment = Alignment.TopStart, offset = IntOffset(0, 120), onDismissRequest = { showExposureSlider = false }) {
-                                Box(
-                                    modifier = Modifier
-                                        .background(Color(0xCC1A1A1A), shape = RoundedCornerShape(8.dp))
-                                        .padding(12.dp)
-                                ) {
+                    if (showExposureSlider) {
+                        Popup(
+                            alignment = Alignment.TopStart,
+                            offset = IntOffset(0, 120),
+                            onDismissRequest = { showExposureSlider = false }
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .background(Color(0xCC1A1A1A), shape = RoundedCornerShape(8.dp))
+                                    .padding(12.dp)
+                            ) {
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    Text(
+                                        "Exposure: ${if (exposureIndex > 0) "+$exposureIndex" else "$exposureIndex"}",
+                                        color = Color.White,
+                                        fontSize = 12.sp
+                                    )
                                     Slider(
                                         value = exposureIndex.toFloat(),
                                         onValueChange = { camView.setExposure(it.toInt()) },
                                         valueRange = exposureRange.first.toFloat()..exposureRange.last.toFloat(),
-                                        modifier = Modifier.width(400.dp)
+                                        modifier = Modifier.width(300.dp)
                                     )
                                 }
                             }
                         }
                     }
-                    Box {
-                        SmallFloatingActionButton(
-                            onClick = {
-                                Log.d("AWA", "Focus button tapped")
-                                camView.toggleFocusMode()
-                                showFocusSlider = (settings.focusMode == CameraViewModel.FocusMode.MANUAL)
-                            },
-                            shape = CircleShape,
-                            modifier = Modifier.size(36.dp)
+                }
+
+                // Focus control
+                Box {
+                    SmallFloatingActionButton(
+                        onClick = {
+                            camView.toggleFocusMode()
+                            showFocusSlider = (settings.focusMode == CameraViewModel.FocusMode.MANUAL)
+                        },
+                        shape = CircleShape,
+                        modifier = Modifier.size(36.dp)
+                    ) {
+                        Text(
+                            text = if (focusMode == CameraViewModel.FocusMode.AUTO) "A" else "M",
+                            fontSize = 16.sp
+                        )
+                    }
+
+                    if (focusMode == CameraViewModel.FocusMode.MANUAL && showFocusSlider) {
+                        Popup(
+                            alignment = Alignment.TopStart,
+                            offset = IntOffset(0, 120),
+                            onDismissRequest = { showFocusSlider = false }
                         ) {
-                            Text(
-                                text = if (focusMode == CameraViewModel.FocusMode.AUTO) "A" else "M",
-                                fontSize = 16.sp
-                            )
-                        }
-                        if (focusMode == CameraViewModel.FocusMode.MANUAL && showFocusSlider) {
-                            Popup(
-                                alignment = Alignment.TopStart,
-                                offset = IntOffset(0, 120),
-                                onDismissRequest = { showFocusSlider = false }) {
-                                Box(
-                                    modifier = Modifier
-                                        .background(Color(0xCC1A1A1A), shape = RoundedCornerShape(8.dp))
-                                        .padding(12.dp)
-                                ) {
-                                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                        Text("Focus Distance", color = Color.White, fontSize = 12.sp)
-                                        Slider(
-                                            value = focusDistance,
-                                            onValueChange = { camView.setFocusDistance(it) },
-                                            valueRange = 0f..1f,
-                                            modifier = Modifier.width(300.dp)
-                                        )
-                                    }
+                            Box(
+                                modifier = Modifier
+                                    .background(Color(0xCC1A1A1A), shape = RoundedCornerShape(8.dp))
+                                    .padding(12.dp)
+                            ) {
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    Text("Focus Distance", color = Color.White, fontSize = 12.sp)
+                                    Slider(
+                                        value = focusDistance,
+                                        onValueChange = { camView.setFocusDistance(it) },
+                                        valueRange = 0f..1f,
+                                        modifier = Modifier.width(300.dp)
+                                    )
                                 }
                             }
                         }
                     }
+                }
+
+                // Flash toggle
+                if (settings.hasFlashUnit) {
                     Box {
                         SmallFloatingActionButton(
                             onClick = {
-                                Log.d("AWA", "Flash button tapped")
                                 camView.toggleFlash()
                             },
                             shape = CircleShape,
@@ -304,74 +338,72 @@ private fun CameraContent(camView: CameraViewModel) {
                         }
                     }
                 }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    if (isServerRunning) {
-                        Box(modifier = Modifier, contentAlignment = Alignment.Center) {
-                            Text("IP : ${ipAddress}:${ if (streamMode == CameraViewModel.StreamMode.H264_RTSP) 8554 else 8080 }", modifier = Modifier.padding(4.dp))
-                        }
+            }
+
+            // Connection & Server IP status
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (isServerRunning) {
+                    Box(modifier = Modifier, contentAlignment = Alignment.Center) {
+                        Text("IP : ${ipAddress}:8554", modifier = Modifier.padding(4.dp))
                     }
-                    if (isServerRunning)
-                        Icon(Icons.Default.Link, contentDescription = "Server Status", tint = Color.Green, modifier = Modifier.padding(horizontal = 2.dp))
-                    else
-                        Icon(Icons.Default.Link, contentDescription = "Server Status", tint = Color.Red, modifier = Modifier.padding(horizontal = 2.dp))
+                }
+                Icon(
+                    Icons.Default.Link,
+                    contentDescription = "Server Status",
+                    tint = if (isServerRunning) Color.Green else Color.Red,
+                    modifier = Modifier.padding(horizontal = 2.dp)
+                )
+            }
+        }
+
+        // Bottom Controls Bar
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .align(Alignment.BottomCenter)
+                .padding(horizontal = 16.dp)
+                .padding(bottom = 32.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            // Left slot - Settings
+            Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
+                IconButton(onClick = {
+                    isSettingsOpen = true
+                }) {
+                    Icon(Icons.Default.Settings, contentDescription = "Settings", tint = Color.White)
                 }
             }
 
-            // Bottom Controls
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .align(Alignment.BottomCenter)
-                    .padding(horizontal = 16.dp)
-                    .padding(bottom = 32.dp),
-                verticalAlignment = Alignment.CenterVertically
+            // Center slot - Shutter / Power
+            FilledTonalButton(
+                onClick = { camView.toggleServer() },
+                contentPadding = PaddingValues(12.dp)
             ) {
-                // Left slot
-                Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
-                    IconButton(onClick = {
-                        isSettingsOpen = true
-                        Log.d("AWA", "Settings button tapped")
-                    }) {
-                        Icon(Icons.Default.Settings, contentDescription = "Settings", tint = Color.White)
-                    }
-                }
+                Icon(
+                    imageVector = Icons.Default.PowerSettingsNew,
+                    contentDescription = if (isServerRunning) "Stop server" else "Start server",
+                    tint = if (isServerRunning) Color.Green else Color.Red,
+                    modifier = Modifier.size(32.dp)
+                )
+            }
 
-                // Center slot — Shutter / Power
-                FilledTonalButton(
-                    onClick = { camView.toggleServer() },
-                    contentPadding = PaddingValues(12.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.PowerSettingsNew,
-                        contentDescription = if (isServerRunning) "Stop server" else "Start server",
-                        tint = if (isServerRunning) Color.Green else Color.Red,
-                        modifier = Modifier.size(32.dp)
-                    )
-                }
-
-                // Right slot
-                Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.CenterEnd) {
-                    IconButton(onClick = { camView.switchCamera() }) {
-                        Icon(Icons.Default.Cameraswitch, contentDescription = "Flip Camera", tint = Color.White)
-                    }
+            // Right slot - Camera Switch
+            Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.CenterEnd) {
+                IconButton(onClick = { camView.switchCamera() }) {
+                    Icon(Icons.Default.Cameraswitch, contentDescription = "Flip Camera", tint = Color.White)
                 }
             }
         }
+
+        // Settings Drawer Panel
+        SettingsPanel(
+            isOpen = isSettingsOpen,
+            onClose = { isSettingsOpen = false },
+            camView = camView,
+            modifier = Modifier.fillMaxSize(),
+            settings = settings
+        )
     }
-
-    SettingsPanel(
-        isOpen = isSettingsOpen,
-        onClose = { isSettingsOpen = false },
-        camView = camView,
-        modifier = Modifier.fillMaxSize(),
-        settings
-    )
-}
-
-@Preview(name = "Idle", showBackground = true, uiMode = Configuration.ORIENTATION_LANDSCAPE)
-@Composable
-fun CameraScreenPreview() {
-    CameraScreen()
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -385,9 +417,6 @@ fun SettingsPanel(
 ) {
     val configuration = LocalConfiguration.current
     val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
-    val quality = settings.jpegQuality
-    var sliderPosition by remember { mutableFloatStateOf(quality.toFloat()) }
-    val streamMode by camView.streamMode
 
     AnimatedVisibility(
         visible = isOpen,
@@ -418,7 +447,7 @@ fun SettingsPanel(
 
                     Spacer(modifier = Modifier.height(24.dp))
 
-                    StreamTypeSelector(camView = camView)
+                    VideoCodecSelector(camView = camView, settings = settings)
 
                     Spacer(modifier = Modifier.height(16.dp))
 
@@ -426,30 +455,11 @@ fun SettingsPanel(
 
                     Spacer(modifier = Modifier.height(16.dp))
 
-                    RotationDropdown(camView = camView, settings = settings)
+                    FpsDropdown(camView = camView, settings = settings)
 
                     Spacer(modifier = Modifier.height(16.dp))
 
-                    if (streamMode == CameraViewModel.StreamMode.MJPEG) {
-                        Text("Quality: ${sliderPosition.toInt()}", color = Color.White)
-                        Spacer(modifier = Modifier.height(16.dp))
-                        Slider(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(24.dp),
-                            value = sliderPosition,
-                            onValueChange = { sliderPosition = it },
-                            onValueChangeFinished = { camView.setQuality(sliderPosition.toInt()) },
-                            valueRange = 10f..100f,
-                            track = { state ->
-                                SliderDefaults.Track(
-                                    sliderState = state,
-                                    modifier = Modifier.height(6.dp)
-                                )
-                            }
-                        )
-                        Spacer(modifier = Modifier.height(16.dp))
-                    }
+                    RotationDropdown(camView = camView, settings = settings)
                 }
             }
         }
@@ -458,19 +468,19 @@ fun SettingsPanel(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun StreamTypeSelector(camView: CameraViewModel) {
-    val streamMode by camView.streamMode
+fun VideoCodecSelector(camView: CameraViewModel, settings: CameraViewModel.CameraSettings) {
     var expanded by remember { mutableStateOf(false) }
+    val currentCodec = settings.videoCodec.uppercase()
 
     ExposedDropdownMenuBox(
         expanded = expanded,
         onExpandedChange = { expanded = it }
     ) {
         OutlinedTextField(
-            value = streamMode.label,
+            value = if (currentCodec == "H265" || currentCodec == "HEVC") "H.265 (HEVC)" else "H.264 (AVC)",
             onValueChange = {},
             readOnly = true,
-            label = { Text("Stream Type") },
+            label = { Text("Hardware Video Codec") },
             trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
             modifier = Modifier
                 .menuAnchor()
@@ -481,12 +491,59 @@ fun StreamTypeSelector(camView: CameraViewModel) {
             expanded = expanded,
             onDismissRequest = { expanded = false }
         ) {
-            CameraViewModel.StreamMode.entries.forEach { mode ->
+            DropdownMenuItem(
+                text = { Text("H.264 (AVC - High Performance)") },
+                onClick = {
+                    camView.setVideoCodec("h264")
+                    expanded = false
+                }
+            )
+            DropdownMenuItem(
+                text = { Text("H.265 (HEVC - High Compression)") },
+                onClick = {
+                    camView.setVideoCodec("h265")
+                    expanded = false
+                }
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun FpsDropdown(camView: CameraViewModel, settings: CameraViewModel.CameraSettings) {
+    val currentFps = settings.fps
+    var expanded by remember { mutableStateOf(false) }
+    val options = listOf(
+        15 to "15 fps (battery saver)",
+        30 to "30 fps (smooth)"
+    )
+    val displayLabel = options.find { it.first == currentFps }?.second ?: "$currentFps fps"
+
+    ExposedDropdownMenuBox(
+        expanded = expanded,
+        onExpandedChange = { expanded = it }
+    ) {
+        OutlinedTextField(
+            value = displayLabel,
+            onValueChange = {},
+            readOnly = true,
+            label = { Text("Frame rate") },
+            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+            modifier = Modifier
+                .menuAnchor()
+                .fillMaxWidth()
+        )
+
+        ExposedDropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false }
+        ) {
+            options.forEach { (fps, label) ->
                 DropdownMenuItem(
-                    text = { Text(mode.label) },
+                    text = { Text(label) },
                     onClick = {
-                        camView.setStreamMode(mode)
-                        Log.d("AWA", "Stream mode set to ${mode.label}")
+                        camView.setFps(fps)
                         expanded = false
                     }
                 )
@@ -526,7 +583,6 @@ fun ResolutionDropdown(camView: CameraViewModel, settings: CameraViewModel.Camer
                     text = { Text(res.label) },
                     onClick = {
                         camView.setResolution(res)
-                        Log.d("AWA", "Resolution set to ${res.label}:${res.size}")
                         expanded = false
                     }
                 )
@@ -573,7 +629,6 @@ fun RotationDropdown(camView: CameraViewModel, settings: CameraViewModel.CameraS
                     text = { Text(label) },
                     onClick = {
                         camView.setRotation(mode)
-                        Log.d("AWA", "Rotation set to $label ($mode)")
                         expanded = false
                     }
                 )

@@ -56,8 +56,10 @@ impl eframe::App for AwcApp {
                 &preview.rgba,
             );
             match &mut self.preview_texture {
-                Some(tex) => tex.set(color_image, egui::TextureOptions::LINEAR),
-                None => {
+                Some(tex) if tex.size() == [preview.width, preview.height] => {
+                    tex.set(color_image, egui::TextureOptions::LINEAR);
+                }
+                _ => {
                     self.preview_texture = Some(ctx.load_texture(
                         "cam_preview",
                         color_image,

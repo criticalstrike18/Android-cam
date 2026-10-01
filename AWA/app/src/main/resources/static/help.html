@@ -36,13 +36,6 @@
 <p>Available endpoints :</p>
 <div class="card">
     <h3>
-        <span class="method get">GET</span> '<code>/video</code>'
-    </h3>
-    <p>MJPEG stream.</p>
-</div>
-
-<div class="card">
-    <h3>
         <span class="method get">GET</span> <code>/features</code>
     </h3>
     <p>Get available features. e.g.</p>
@@ -52,7 +45,7 @@
     "manual_focus": true,
     "exposure_lower": -20,
     "exposure_upper": 20,
-    "stream_protocol": "MJPEG"
+    "stream_protocol": "rtsp"
 }</code>
     </pre>
 </div>
@@ -106,7 +99,7 @@
 </div>
 </div><div class="card">
     <h3>Note:</h3>
-    <p>Zoom is not supported yet. For more details check out : <a href="https://github.com/soubhagyajit/Android-Webcam-Project">Github Project</a></p>
+    <p>Video is RTSP only (port 8554); there is no MJPEG endpoint. Zoom is supported (1.0x-5.0x). For more details check out : <a href="https://github.com/soubhagyajit/Android-Webcam-Project">Github Project</a></p>
     <pre><code>
 {
     "focus_mode": 0,

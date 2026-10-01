@@ -3,15 +3,13 @@ use std::process::Command;
 use virtualcam::camera::available_backends;
 use virtualcam::pixel_format::PixelFormat;
 use virtualcam::Camera;
-use crate::stream::pipeline::rgb_to_nv12;
 
 const OBS_GUID: &str = "{A3FCE0F5-3493-419F-958A-ABA1250EC20B}";
 
 pub struct VirtualCamera {
     camera: Option<Camera>,
-    mjpeg_nv12_buf: Vec<u8>,
-    width: u32,
-    height: u32,
+    pub width: u32,
+    pub height: u32,
 }
 
 fn is_driver_registered() -> bool {
@@ -23,25 +21,21 @@ fn is_driver_registered() -> bool {
 }
 
 fn get_bundled_driver_dir() -> Option<PathBuf> {
+    // 1. Current executable directory (production)
     if let Ok(exe_path) = std::env::current_exe() {
-        if let Some(parent) = exe_path.parent() {
-            let candidate = parent.join("obs-virtualcam-module");
-            if candidate.exists() {
-                return Some(candidate);
-            }
-            if let Some(workspace_dir) = parent.parent().and_then(|p| p.parent()) {
-                let candidate = workspace_dir.join("CLIENT/obs-virtualcam-module");
-                if candidate.exists() {
-                    return Some(candidate);
-                }
+        if let Some(exe_dir) = exe_path.parent() {
+            let driver_dir = exe_dir.join("drivers").join("obs-virtualcam");
+            if driver_dir.join("obs-virtualcam-module64.dll").exists() {
+                return Some(driver_dir);
             }
         }
     }
 
+    // 2. Cargo manifest directory (development)
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let candidate = manifest_dir.join("../obs-virtualcam-module");
-    if candidate.exists() {
-        return Some(candidate);
+    let dev_driver_dir = manifest_dir.join("drivers").join("obs-virtualcam");
+    if dev_driver_dir.join("obs-virtualcam-module64.dll").exists() {
+        return Some(dev_driver_dir);
     }
 
     None
@@ -49,25 +43,46 @@ fn get_bundled_driver_dir() -> Option<PathBuf> {
 
 fn ensure_bundled_driver_installed() {
     if is_driver_registered() {
-        println!("[VirtualCam] OBS Virtual Camera driver is already registered in Windows Registry.");
         return;
     }
 
-    println!("[VirtualCam] Virtual camera driver not registered. Attempting background installation...");
+    println!("[VirtualCam] OBS Virtual Camera driver not registered. Attempting auto-registration from bundled files...");
 
-    if let Some(driver_dir) = get_bundled_driver_dir() {
-        let install_script = driver_dir.join("install.ps1");
-        let dll_path = driver_dir.join("obs-virtualcam-module64.dll");
-
-        if dll_path.exists() {
-            let _ = Command::new("regsvr32.exe")
-                .args(["/s", dll_path.to_str().unwrap_or("")])
-                .status();
+    let driver_dir = match get_bundled_driver_dir() {
+        Some(d) => d,
+        None => {
+            eprintln!("[VirtualCam] Bundled driver directory not found. Skipping auto-install.");
+            return;
         }
+    };
 
-        if !is_driver_registered() && install_script.exists() {
+    let dll_path = driver_dir.join("obs-virtualcam-module64.dll");
+    let install_script = driver_dir.join("install.ps1");
+
+    if !dll_path.exists() {
+        eprintln!("[VirtualCam] Driver DLL not found at: {}", dll_path.display());
+        return;
+    }
+
+    // Attempt direct regsvr32 silent registration first
+    let reg_status = Command::new("regsvr32.exe")
+        .args(["/s", &dll_path.to_string_lossy()])
+        .status();
+
+    if let Ok(status) = reg_status {
+        if status.success() && is_driver_registered() {
+            println!("[VirtualCam] Successfully registered bundled virtual camera driver via regsvr32!");
+            return;
+        }
+    }
+
+    // If direct registration failed (e.g. requires elevation), trigger elevated install.ps1
+    if install_script.exists() {
+        println!("[VirtualCam] Requesting elevation to register virtual camera driver...");
+        #[cfg(target_os = "windows")]
+        {
             let ps_cmd = format!(
-                "Start-Process powershell -ArgumentList '-ExecutionPolicy Bypass -NoProfile -WindowStyle Hidden -File \"{}\"' -Verb RunAs -Wait",
+                "Start-Process powershell -ArgumentList '-ExecutionPolicy Bypass -NoProfile -WindowStyle Hidden -File \\\"{}\\\"' -Verb RunAs -Wait",
                 install_script.display()
             );
             let _ = Command::new("powershell")
@@ -111,39 +126,22 @@ impl VirtualCamera {
             }
         };
 
-        let nv12_size = (width * height * 3 / 2) as usize;
         Self {
             camera,
-            mjpeg_nv12_buf: vec![0u8; nv12_size],
             width,
             height,
         }
     }
 
-    /// Zero-overhead native NV12 frame publishing directly to OBS virtual camera shared memory
+    /// Zero-overhead native NV12 frame publishing directly to OBS virtual camera shared memory.
+    ///
+    /// Returns `Err` when no virtual camera is present, rather than a silent
+    /// `Ok(())`. Reporting success here made the FPS and frame counters claim a
+    /// working virtual camera on machines where the driver never came up.
     pub fn send_nv12(&mut self, nv12_data: &[u8]) -> Result<(), String> {
-        if let Some(ref mut cam) = self.camera {
-            cam.send(nv12_data).map_err(|e| e.to_string())
-        } else {
-            Ok(())
-        }
-    }
-
-    /// Backward compatibility / MJPEG RGB publishing: converts RGB to NV12 into preallocated buffer
-    pub fn send_frame(&mut self, rgb_data: &[u8]) -> Result<(), String> {
-        if self.camera.is_some() {
-            let nv12_size = (self.width * self.height * 3 / 2) as usize;
-            if self.mjpeg_nv12_buf.len() != nv12_size {
-                self.mjpeg_nv12_buf.resize(nv12_size, 0);
-            }
-            rgb_to_nv12(rgb_data, self.width, self.height, &mut self.mjpeg_nv12_buf);
-            if let Some(ref mut cam) = self.camera {
-                cam.send(&self.mjpeg_nv12_buf).map_err(|e| e.to_string())
-            } else {
-                Ok(())
-            }
-        } else {
-            Ok(())
+        match self.camera.as_mut() {
+            Some(cam) => cam.send(nv12_data).map_err(|e| e.to_string()),
+            None => Err("no virtual camera available (driver not initialised)".to_string()),
         }
     }
 

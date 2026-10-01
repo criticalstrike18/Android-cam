@@ -8,6 +8,8 @@ pub struct PhoneSettings {
     pub stream_protocol: String,
     pub rotation: String,
     #[serde(default)]
+    pub video_codec: String,
+    #[serde(default)]
     pub supported_resolutions: Vec<String>,
     #[serde(default)]
     pub flash: bool,
@@ -37,6 +39,7 @@ pub struct SharedAppState {
     pub camera: String,
     pub resolution: String,
     pub codec: String,
+    pub video_codec: String, // "h264" or "h265"
     pub rotation: String,
     pub supported_resolutions: Vec<String>,
     pub flash_enabled: bool,
@@ -62,6 +65,7 @@ impl Default for SharedAppState {
             camera: "back".to_string(),
             resolution: "1280x720".to_string(),
             codec: "rtsp".to_string(),
+            video_codec: "h264".to_string(),
             rotation: "auto".to_string(),
             supported_resolutions: vec![
                 "3840x2160".to_string(),

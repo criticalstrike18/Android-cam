@@ -10,7 +10,7 @@ Open-source (GPL-3.0)
 
 The system consists of two tightly coupled, high-performance components:
 
-- 📱 **AWA (Android Webcam App)**: Native Kotlin Android application using Camera2 and MediaCodec hardware acceleration. Streams sub-second H.264 over RTSP (port 8554) with a secondary low-latency MJPEG HTTP fallback (port 8080).
+- 📱 **AWA (Android Webcam App)**: Native Kotlin Android application using Camera2 and MediaCodec hardware acceleration. Streams H.264 or H.265 over RTSP (port 8554), with an HTTP/WebSocket control plane on port 8080.
 - 💻 **AWC-GUI (Pure Rust Desktop Client)**: Ultra-fast native client written in **Rust (`egui` / `eframe`)** featuring a modern **Shadcn-inspired Dark Theme**, fully responsive maximized video viewport, integrated OpenH264 decoder, and silent direct memory output to **OBS Virtual Camera** (DirectShow).
 
 ---
@@ -20,13 +20,13 @@ The system consists of two tightly coupled, high-performance components:
 ### Desktop Client (`AWC-GUI`)
 - **Shadcn-Inspired Dark Design**: Sleek zinc palette (`#09090b` / `#18181b` / `#27272a`), refined cards, segmented controls, and pulsing status badge pills.
 - **Fully Responsive Dynamic Viewport**: The video preview automatically expands to fill 100% of available window space while strictly preserving aspect ratio. Resizable right-hand controls sidebar with smooth vertical scrolling.
-- **Hardware-Accelerated Zero-Lag Decoding**: Direct in-memory OpenH264 decoding pushing NV12 frames directly into the DirectShow virtual camera buffer at **30 FPS with sub-second latency**.
+- **Zero-Copy Software Decoding**: In-memory OpenH264 decoding pushing NV12 frames directly into the virtual camera buffer. Decode is the throughput limit in debug builds; see `STATUS.md` §5 for measured numbers.
 - **Silent Virtual Camera Integration**: Seamlessly bundled OBS Virtual Camera output without any intrusive command prompts or extra buttons. Compatible with **Zoom, Microsoft Teams, Google Meet, Discord, OBS Studio, Skype**, and web browsers.
 - **Lock-Free Telemetry**: Real-time HUD overlay on the video feed showing resolution, virtual camera status, and measured FPS.
 
 ### Mobile Application (`AWA`)
 - **Thermal & Battery Optimization**: Native offscreen EGL rendering automatically detaches physical display composition when the preview dims, idling CPU at **~0%** and keeping phone thermals cool (36°C).
-- **Auto-Rotation & Orientation Lock**: Physical device rotation handled smoothly inside the GPU shader matrix without activity recreation or stream interruptions.
+- **Auto-Rotation & Orientation Lock**: In `auto` rotation mode the physical device orientation is applied to the encoder output without activity recreation or stream interruptions. An explicit degrees value can be set instead.
 - **Hardware Controls**:
   - Rear and Front camera switching
   - Continuous digital zoom (clamped 1.0x to 5.0x)

@@ -2,8 +2,10 @@ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.kotlin.serialization)
-    id("kotlin-parcelize")
 }
+
+// Only CameraSelector.LENS_FACING_* constants are used; camera-core provides them.
+val cameraXVersion = "1.4.1"
 
 android {
     namespace = "com.sjbtechnologies.awa"
@@ -22,6 +24,10 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = false
+            // NOTE: this is the DEBUG key. It is fine for local/sideload builds but must be
+            // replaced with a real upload key before publishing anywhere - a debug-signed
+            // release is rejected by Play and is trivially spoofable.
+            signingConfig = signingConfigs.getByName("debug")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -38,14 +44,10 @@ android {
 }
 
 dependencies {
-    val cameraxVersion = "1.4.1"
-    implementation("androidx.camera:camera-core:$cameraxVersion")
-    implementation("androidx.camera:camera-camera2:$cameraxVersion")
-    implementation("androidx.camera:camera-lifecycle:$cameraxVersion")
-    implementation("androidx.camera:camera-view:$cameraxVersion")
+    implementation("androidx.camera:camera-core:$cameraXVersion")
 
     implementation("androidx.compose.material:material-icons-extended")
-    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
+    implementation(libs.androidx.lifecycle.viewmodel.compose)
 
     implementation("io.ktor:ktor-server-core:3.5.1")
     implementation("io.ktor:ktor-server-cio:3.5.1")
@@ -58,8 +60,8 @@ dependencies {
     implementation("com.github.pedroSG94.RootEncoder:library:2.7.5")
     implementation("com.github.pedroSG94:RTSP-Server:1.4.1")
 
-    implementation("androidx.core:core-ktx:1.15.0")
-    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
+    implementation(libs.androidx.core.ktx)
+    implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.activity.compose)
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.compose.ui)

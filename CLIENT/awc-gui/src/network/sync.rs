@@ -13,7 +13,7 @@ fn query_to_json_update(cmd: &str) -> String {
     for part in cmd.split('&') {
         if let Some((k, v)) = part.split_once('=') {
             match k {
-                "camera" | "resolution_str" | "stream_protocol" | "rotation" => {
+                "camera" | "resolution_str" | "stream_protocol" | "rotation" | "video_codec" => {
                     map.insert(k.to_string(), serde_json::Value::String(v.to_string()));
                 }
                 "flash" => {
@@ -28,7 +28,7 @@ fn query_to_json_update(cmd: &str) -> String {
                         }
                     }
                 }
-                "exposure_index" | "focus_mode" | "stream_quality" => {
+                "exposure_index" | "focus_mode" | "stream_quality" | "fps" => {
                     if let Ok(i) = v.parse::<i64>() {
                         map.insert(k.to_string(), serde_json::Value::Number(i.into()));
                     }
@@ -52,13 +52,20 @@ fn apply_settings(s: &mut SharedAppState, settings: PhoneSettings) {
     s.camera = settings.camera;
     s.resolution = settings.resolution_str.clone();
     s.codec = settings.stream_protocol.to_lowercase();
+    if !settings.video_codec.is_empty() {
+        s.video_codec = settings.video_codec.to_lowercase();
+    }
     s.rotation = settings.rotation.to_lowercase();
     s.flash_enabled = settings.flash;
     s.has_flash = settings.has_flash_unit;
     s.zoom = settings.zoom;
     s.exposure = settings.exposure_index;
     if !settings.supported_resolutions.is_empty() {
-        s.supported_resolutions = settings.supported_resolutions;
+        let mut list = settings.supported_resolutions;
+        if s.camera == "back" && !list.iter().any(|r| r.contains("3840x2160")) {
+            list.push("3840x2160".to_string());
+        }
+        s.supported_resolutions = list;
     }
 
     let parts: Vec<&str> = settings.resolution_str.split('x').collect();
