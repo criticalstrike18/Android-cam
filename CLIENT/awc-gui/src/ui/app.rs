@@ -18,6 +18,12 @@ pub struct AwcApp {
     pub connection_mode: String,
     pub status_msg: String,
     pub theme_initialized: bool,
+    pub zoom_drag: Option<f32>,
+    pub exp_drag: Option<i32>,
+    pub zoom_last_sent: std::time::Instant,
+    pub exp_last_sent: std::time::Instant,
+    pub last_seen_phone_ip: String,
+    pub forward_status: Arc<Mutex<String>>,
 }
 
 impl AwcApp {
@@ -30,6 +36,12 @@ impl AwcApp {
             connection_mode: "USB".to_string(),
             status_msg: "Ready (USB Mode)".to_string(),
             theme_initialized: false,
+            zoom_drag: None,
+            exp_drag: None,
+            zoom_last_sent: std::time::Instant::now(),
+            exp_last_sent: std::time::Instant::now(),
+            last_seen_phone_ip: DEFAULT_PHONE_IP.to_string(),
+            forward_status: Arc::new(Mutex::new(String::new())),
         }
     }
 }
@@ -103,6 +115,12 @@ impl eframe::App for AwcApp {
                             &mut self.connection_mode,
                             &mut self.phone_ip_input,
                             &mut self.status_msg,
+                            &mut self.zoom_drag,
+                            &mut self.exp_drag,
+                            &mut self.zoom_last_sent,
+                            &mut self.exp_last_sent,
+                            &mut self.last_seen_phone_ip,
+                            &self.forward_status,
                         );
                     });
             });

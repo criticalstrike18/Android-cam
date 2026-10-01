@@ -4,7 +4,7 @@ use std::thread;
 use std::time::Duration;
 
 use crate::core::config::DEFAULT_PHONE_IP;
-use crate::core::state::{PhoneSettings, SharedAppState};
+use crate::core::state::{PhoneFeatures, PhoneSettings, SharedAppState};
 use crate::network::ws_client::WebSocketClient;
 use crate::platform::adb::{is_adb_device_connected, run_adb_forward};
 
@@ -77,6 +77,45 @@ fn apply_settings(s: &mut SharedAppState, settings: PhoneSettings) {
     }
 }
 
+/// Pull `/features` (exposure/zoom ranges) once the control plane is reachable.
+/// Runs on the sync thread, never the UI thread. A failure keeps the previous
+/// ranges — which default to the historical hardcoded bounds — so this can only
+/// narrow the sliders toward the truth, never break them.
+fn refresh_features(
+    client: &reqwest::blocking::Client,
+    phone_ip: &str,
+    state: &Arc<Mutex<SharedAppState>>,
+) {
+    let url = format!("http://{}:8080/features", phone_ip);
+    let Ok(resp) = client.get(&url).send() else {
+        return;
+    };
+    let Ok(feat) = resp.json::<PhoneFeatures>() else {
+        return;
+    };
+    // Sanity-guard: a degenerate range is worse than the default, ignore it.
+    if feat.exposure_upper < feat.exposure_lower {
+        return;
+    }
+    if !(feat.zoom_max > feat.zoom_min && feat.zoom_min >= 1.0) {
+        return;
+    }
+    if let Ok(mut s) = state.lock() {
+        // Only log on actual change to avoid spamming every reconnect.
+        if s.features.exposure_lower != feat.exposure_lower
+            || s.features.exposure_upper != feat.exposure_upper
+            || (s.features.zoom_min - feat.zoom_min).abs() > f32::EPSILON
+            || (s.features.zoom_max - feat.zoom_max).abs() > f32::EPSILON
+        {
+            println!(
+                "[SyncWorker] capability ranges: exposure {}..{}, zoom {:.1}..{:.1}",
+                feat.exposure_lower, feat.exposure_upper, feat.zoom_min, feat.zoom_max
+            );
+            s.features = feat;
+        }
+    }
+}
+
 pub fn sync_worker(state: Arc<Mutex<SharedAppState>>, running: Arc<AtomicBool>) {
     let mut consecutive_usb_failures = 0u32;
     let mut last_adb_check = std::time::Instant::now();
@@ -124,6 +163,7 @@ pub fn sync_worker(state: Arc<Mutex<SharedAppState>>, running: Arc<AtomicBool>) 
                     if let Ok(mut s) = state.lock() {
                         s.connected = true;
                     }
+                    refresh_features(&http_fallback_client, &phone_ip, &state);
                 }
                 Err(_e) => {
                     // Try HTTP fallback to verify if phone server is reachable
@@ -134,6 +174,7 @@ pub fn sync_worker(state: Arc<Mutex<SharedAppState>>, running: Arc<AtomicBool>) 
                             if let Ok(mut s) = state.lock() {
                                 apply_settings(&mut s, settings);
                             }
+                            refresh_features(&http_fallback_client, &phone_ip, &state);
                         }
                     } else {
                         if let Ok(mut s) = state.lock() {

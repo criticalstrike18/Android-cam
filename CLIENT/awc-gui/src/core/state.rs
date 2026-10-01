@@ -21,6 +21,38 @@ pub struct PhoneSettings {
     pub exposure_index: i32,
 }
 
+/// Capability ranges from the phone's `/features` endpoint. The sliders are
+/// bounded by these — never by hardcoded guesses — so a thumb can always reach
+/// both ends. Defaults equal the historical hardcoded bounds, so an unreachable
+/// `/features` degrades to exactly today's behaviour.
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct PhoneFeatures {
+    #[serde(default = "default_exposure_min")]
+    pub exposure_lower: i32,
+    #[serde(default = "default_exposure_max")]
+    pub exposure_upper: i32,
+    #[serde(default = "default_zoom_min")]
+    pub zoom_min: f32,
+    #[serde(default = "default_zoom_max")]
+    pub zoom_max: f32,
+}
+
+fn default_exposure_min() -> i32 { -12 }
+fn default_exposure_max() -> i32 { 12 }
+fn default_zoom_min() -> f32 { 1.0 }
+fn default_zoom_max() -> f32 { 5.0 }
+
+impl Default for PhoneFeatures {
+    fn default() -> Self {
+        Self {
+            exposure_lower: default_exposure_min(),
+            exposure_upper: default_exposure_max(),
+            zoom_min: default_zoom_min(),
+            zoom_max: default_zoom_max(),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct PreviewFrame {
     pub width: usize,
@@ -51,6 +83,7 @@ pub struct SharedAppState {
     pub source_w: u32,
     pub source_h: u32,
     pub pending_command: Option<String>,
+    pub features: PhoneFeatures,
 }
 
 impl Default for SharedAppState {
@@ -83,6 +116,7 @@ impl Default for SharedAppState {
             source_w: 1280,
             source_h: 720,
             pending_command: None,
+            features: PhoneFeatures::default(),
         }
     }
 }

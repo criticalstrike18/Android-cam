@@ -226,6 +226,18 @@ pub fn stream_worker(
                                 // the next decode.
                                 continue;
                             }
+                            // Desktop preview always flows, even when the virtual camera
+                            // is unavailable (driver missing or held by another app):
+                            // preview is the user's window into the stream, vcam is an
+                            // output. A vcam error must not starve the preview channel.
+                            if !is_backlog && res.prev_w > 0 && res.prev_h > 0 {
+                                let preview = PreviewFrame {
+                                    width: res.prev_w as usize,
+                                    height: res.prev_h as usize,
+                                    rgba: rgba_buf.clone(),
+                                };
+                                send_preview_best_effort(&preview_tx, preview);
+                            }
                             // Publish to the virtual camera, and only count the
                             // frame as sent when that actually succeeded. Otherwise
                             // the FPS overlay claims success with no camera present.
@@ -261,15 +273,6 @@ pub fn stream_worker(
                                     }
                                     continue;
                                 }
-                            }
-
-                            if !is_backlog && res.prev_w > 0 && res.prev_h > 0 {
-                                let preview = PreviewFrame {
-                                    width: res.prev_w as usize,
-                                    height: res.prev_h as usize,
-                                    rgba: rgba_buf.clone(),
-                                };
-                                send_preview_best_effort(&preview_tx, preview);
                             }
                         }
                         Ok(None) => {}

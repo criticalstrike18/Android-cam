@@ -51,6 +51,22 @@ fn segmented_btn(ui: &mut egui::Ui, active: bool, label: &str) -> bool {
     ui.add(btn).clicked()
 }
 
+/// Spawning `adb` takes hundreds of ms and used to run on the UI thread — every
+/// click visibly froze the window. The result lands in `forward_status`, which the
+/// card header adopts into `status_msg` on the next frame.
+fn spawn_adb_forward(forward_status: &Arc<Mutex<String>>) {
+    let cell = forward_status.clone();
+    std::thread::spawn(move || {
+        let msg = match run_adb_forward() {
+            Ok(m) => m,
+            Err(e) => e,
+        };
+        if let Ok(mut c) = cell.lock() {
+            *c = msg;
+        }
+    });
+}
+
 pub fn render_controls(
     ui: &mut egui::Ui,
     ctx: &egui::Context,
@@ -59,6 +75,12 @@ pub fn render_controls(
     connection_mode: &mut String,
     phone_ip_input: &mut String,
     status_msg: &mut String,
+    zoom_drag: &mut Option<f32>,
+    exp_drag: &mut Option<i32>,
+    zoom_last_sent: &mut std::time::Instant,
+    exp_last_sent: &mut std::time::Instant,
+    last_seen_phone_ip: &mut String,
+    forward_status: &Arc<Mutex<String>>,
 ) {
     ui.spacing_mut().item_spacing = Vec2::new(0.0, 10.0);
 
@@ -69,22 +91,32 @@ pub fn render_controls(
         section_header(ui, "⚡", "PHONE CONNECTION");
         ui.add_space(4.0);
 
-        // Segmented connection mode selector
-        let is_usb = connection_mode.as_str() == "USB";
-        let is_wifi = connection_mode.as_str() == "WiFi";
+        // Pick up the background ADB-forward result (never block the UI thread).
+        if let Ok(mut cell) = forward_status.lock() {
+            if !cell.is_empty() {
+                *status_msg = std::mem::take(&mut *cell);
+            }
+        }
+
+        // Highlight follows shared state, not the last click: auto-failover flips
+        // state.connection_mode without touching this UI, and the old code kept
+        // highlighting the dead transport afterwards.
+        let show_usb = current_state.connection_mode == "usb";
+        let is_usb = show_usb;
+        let is_wifi = !show_usb;
 
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing = Vec2::new(6.0, 0.0);
             if segmented_btn(ui, is_usb, "🔌 USB (ADB)") && !is_usb {
                 *connection_mode = "USB".to_string();
                 *phone_ip_input = DEFAULT_PHONE_IP.to_string();
+                *last_seen_phone_ip = DEFAULT_PHONE_IP.to_string();
+                *status_msg = "Forwarding ADB ports…".to_string();
                 let mut s = state_arc.lock().unwrap();
                 s.phone_ip = DEFAULT_PHONE_IP.to_string();
                 s.connection_mode = "usb".to_string();
-                match run_adb_forward() {
-                    Ok(msg) => *status_msg = msg,
-                    Err(e) => *status_msg = e,
-                }
+                drop(s);
+                spawn_adb_forward(forward_status);
             }
             if segmented_btn(ui, is_wifi, "📶 Wi-Fi (IP)") && !is_wifi {
                 *connection_mode = "WiFi".to_string();
@@ -94,12 +126,25 @@ pub fn render_controls(
                     *phone_ip_input = s.wifi_ip.clone();
                 }
                 s.phone_ip = phone_ip_input.clone();
+                *last_seen_phone_ip = phone_ip_input.clone();
+                *status_msg = format!("Connecting to {}…", phone_ip_input);
             }
         });
 
         ui.add_space(8.0);
 
-        if connection_mode.as_str() == "USB" {
+        // Adopt endpoints chosen anywhere but here (auto-failover): a stale IP in
+        // the box is worse than none. last_seen tracks the state value the box
+        // displayed last frame; a mismatch against the box means the user is
+        // typing and must not be yanked, a match means nobody touched it.
+        if *phone_ip_input != current_state.phone_ip && *phone_ip_input == *last_seen_phone_ip {
+            *phone_ip_input = current_state.phone_ip.clone();
+        }
+        *last_seen_phone_ip = current_state.phone_ip.clone();
+        // Keep the (now display-only) local mode in step with failover.
+        *connection_mode = if show_usb { "USB".to_string() } else { "WiFi".to_string() };
+
+        if show_usb {
             if ui
                 .add(
                     egui::Button::new(
@@ -114,10 +159,8 @@ pub fn render_controls(
                 )
                 .clicked()
             {
-                match run_adb_forward() {
-                    Ok(msg) => *status_msg = msg,
-                    Err(e) => *status_msg = e,
-                }
+                *status_msg = "Forwarding ADB ports…".to_string();
+                spawn_adb_forward(forward_status);
             }
 
             ui.add_space(4.0);
@@ -165,7 +208,8 @@ pub fn render_controls(
                     let mut s = state_arc.lock().unwrap();
                     s.phone_ip = clean_ip.clone();
                     s.wifi_ip = clean_ip.clone();
-                    *status_msg = format!("Connecting to {}", clean_ip);
+                    *last_seen_phone_ip = clean_ip.clone();
+                    *status_msg = format!("Connecting to {}…", clean_ip);
                 }
             });
         }
@@ -205,64 +249,36 @@ pub fn render_controls(
 
         ui.add_space(8.0);
 
-        // Resolution selector
+        // Resolution selector: a fixed inline list, never a popup. The phone offers
+        // at most ~6 resolutions, so a dropdown only adds open-click-scroll-click
+        // for zero space saving — and the popup scrolled even when everything fit.
         ui.label(egui::RichText::new("Resolution").size(12.0).color(colors::TEXT_MUTED));
-        egui::ComboBox::from_id_salt("res_combo")
-            .selected_text(
-                egui::RichText::new(format_resolution_label(&current_state.resolution))
-                    .size(12.0)
-                    .color(colors::TEXT_PRIMARY),
-            )
-            .width(ui.available_width() - 8.0)
-            .show_ui(ui, |ui| {
-                for res in &current_state.supported_resolutions {
-                    let is_selected = res == &current_state.resolution;
-                    let display_label = format_resolution_label(res);
-                    if ui.selectable_label(is_selected, &display_label).clicked() && !is_selected {
-                        let mut s = state_arc.lock().unwrap();
-                        s.pending_command = Some(format!("resolution_str={}", res));
-                    }
-                }
-            });
-
-        ui.add_space(8.0);
-
-        // Digital Zoom slider
-        ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("Digital Zoom").size(12.0).color(colors::TEXT_MUTED));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(
-                    egui::RichText::new(format!("{:.1}x", current_state.zoom))
-                        .size(12.0)
-                        .strong()
-                        .color(colors::ACCENT_PRIMARY),
-                );
-            });
-        });
-
-        let mut zoom_val = current_state.zoom.clamp(1.0, 5.0);
-        if ui
-            .add(
-                egui::Slider::new(&mut zoom_val, 1.0..=5.0)
-                    .show_value(false)
-                    .step_by(0.1),
-            )
-            .changed()
-        {
-            let mut s = state_arc.lock().unwrap();
-            s.zoom = zoom_val;
-            s.pending_command = Some(format!("zoom={:.1}", zoom_val));
+        for res in &current_state.supported_resolutions {
+            let is_selected = res == &current_state.resolution;
+            let display_label = format_resolution_label(res);
+            if ui
+                .selectable_label(is_selected, egui::RichText::new(display_label).size(12.0))
+                .clicked()
+                && !is_selected
+            {
+                let mut s = state_arc.lock().unwrap();
+                s.pending_command = Some(format!("resolution_str={}", res));
+            }
         }
 
         ui.add_space(8.0);
 
-        // Exposure Compensation slider
+        // Digital Zoom slider: drag-local thumb, phone-advertised bounds, throttled
+        // commit. The old code re-seeded the thumb from shared state every frame
+        // while the phone echoed applied values asynchronously — the thumb snapped
+        // back mid-drag and "ended in the middle". Bounds come from /features
+        // (zoom_min/max), so both ends are always reachable.
+        let zoom_shown = zoom_drag.unwrap_or(current_state.zoom);
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("Exposure Index").size(12.0).color(colors::TEXT_MUTED));
+            ui.label(egui::RichText::new("Digital Zoom").size(12.0).color(colors::TEXT_MUTED));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let sign = if current_state.exposure > 0 { "+" } else { "" };
                 ui.label(
-                    egui::RichText::new(format!("{}{}", sign, current_state.exposure))
+                    egui::RichText::new(format!("{:.1}x", zoom_shown))
                         .size(12.0)
                         .strong()
                         .color(colors::ACCENT_PRIMARY),
@@ -270,18 +286,87 @@ pub fn render_controls(
             });
         });
 
-        let mut exp_val = current_state.exposure;
-        if ui
-            .add(
-                egui::Slider::new(&mut exp_val, -12..=12)
-                    .show_value(false)
-                    .step_by(1.0),
-            )
-            .changed()
-        {
+        let zmin = current_state.features.zoom_min;
+        let zmax = current_state.features.zoom_max.max(zmin + 0.1);
+        let mut zoom_val = zoom_shown.clamp(zmin, zmax);
+        let zoom_resp = ui.add(
+            egui::Slider::new(&mut zoom_val, zmin..=zmax)
+                .show_value(false)
+                .step_by(0.1),
+        );
+        if zoom_resp.changed() {
+            *zoom_drag = Some(zoom_val);
+            // Live-apply while dragging, at most every 150 ms: each commit is a
+            // command + phone round-trip, and unthrottled ticks spam the single
+            // pending_command slot (all but the last are dropped anyway).
+            if zoom_resp.drag_stopped()
+                || zoom_last_sent.elapsed() >= std::time::Duration::from_millis(150)
+            {
+                *zoom_last_sent = std::time::Instant::now();
+                let mut s = state_arc.lock().unwrap();
+                s.zoom = zoom_val;
+                s.pending_command = Some(format!("zoom={:.1}", zoom_val));
+            }
+        } else if zoom_resp.drag_stopped() {
+            // Released with no final tick (throttle swallowed it, or click without
+            // move): flush the drag value so the phone ends where the thumb is.
+            *zoom_last_sent = std::time::Instant::now();
+            let mut s = state_arc.lock().unwrap();
+            s.zoom = zoom_val;
+            s.pending_command = Some(format!("zoom={:.1}", zoom_val));
+            *zoom_drag = None;
+        }
+        if zoom_resp.drag_stopped() && zoom_drag.is_some() {
+            *zoom_drag = None;
+        }
+
+        ui.add_space(8.0);
+
+        // Exposure slider: same drag-local pattern as zoom, bounded by the phone's
+        // real CONTROL_AE_COMPENSATION_RANGE from /features. The old -12..+12 was a
+        // guess; dragging past the hardware max made the phone clamp and yank the
+        // thumb back, so the slider could never reach its own ends.
+        let exp_shown = exp_drag.unwrap_or(current_state.exposure);
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Exposure Index").size(12.0).color(colors::TEXT_MUTED));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let sign = if exp_shown > 0 { "+" } else { "" };
+                ui.label(
+                    egui::RichText::new(format!("{}{}", sign, exp_shown))
+                        .size(12.0)
+                        .strong()
+                        .color(colors::ACCENT_PRIMARY),
+                );
+            });
+        });
+
+        let emin = current_state.features.exposure_lower;
+        let emax = current_state.features.exposure_upper.max(emin);
+        let mut exp_val = exp_shown.clamp(emin, emax);
+        let exp_resp = ui.add(
+            egui::Slider::new(&mut exp_val, emin..=emax)
+                .show_value(false)
+                .step_by(1.0),
+        );
+        if exp_resp.changed() {
+            *exp_drag = Some(exp_val);
+            if exp_resp.drag_stopped()
+                || exp_last_sent.elapsed() >= std::time::Duration::from_millis(150)
+            {
+                *exp_last_sent = std::time::Instant::now();
+                let mut s = state_arc.lock().unwrap();
+                s.exposure = exp_val;
+                s.pending_command = Some(format!("exposure_index={}", exp_val));
+            }
+        } else if exp_resp.drag_stopped() {
+            *exp_last_sent = std::time::Instant::now();
             let mut s = state_arc.lock().unwrap();
             s.exposure = exp_val;
             s.pending_command = Some(format!("exposure_index={}", exp_val));
+            *exp_drag = None;
+        }
+        if exp_resp.drag_stopped() && exp_drag.is_some() {
+            *exp_drag = None;
         }
 
         // Flash Light Toggle
