@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::TcpStream;
+use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -182,8 +182,19 @@ pub struct RtspSession {
 
 impl RtspSession {
     pub fn connect(phone_ip: &str, port: u16) -> Result<Self, String> {
-        let addr = format!("{}:{}", phone_ip, port);
-        let stream = TcpStream::connect(&addr).map_err(|e| format!("TCP connect to {} failed: {}", addr, e))?;
+        // Bounded dial: the blocking TcpStream::connect inherits the OS timeout
+        // (seconds to tens of seconds on dead IPs), which stalled every transport
+        // switch behind an invisible wait. 1.5 s cannot false-positive a healthy
+        // endpoint — LAN connects complete in milliseconds.
+        const DIAL_TIMEOUT: Duration = Duration::from_millis(1500);
+        let addr_str = format!("{}:{}", phone_ip, port);
+        let addr = addr_str
+            .to_socket_addrs()
+            .map_err(|e| format!("TCP resolve {} failed: {}", addr_str, e))?
+            .next()
+            .ok_or_else(|| format!("TCP resolve {} failed: no address", addr_str))?;
+        let stream = TcpStream::connect_timeout(&addr, DIAL_TIMEOUT)
+            .map_err(|e| format!("TCP connect to {} failed: {}", addr_str, e))?;
         let _ = stream.set_nodelay(true);
         set_low_latency_socket_buffer(&stream);
         stream

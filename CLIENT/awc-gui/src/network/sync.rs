@@ -121,6 +121,7 @@ pub fn sync_worker(state: Arc<Mutex<SharedAppState>>, running: Arc<AtomicBool>) 
     let mut last_adb_check = std::time::Instant::now();
     let mut ws: Option<WebSocketClient> = None;
     let mut current_connected_ip = String::new();
+    let mut prev_endpoint = (String::new(), String::new());
 
     let http_fallback_client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_millis(500))
@@ -138,6 +139,15 @@ pub fn sync_worker(state: Arc<Mutex<SharedAppState>>, running: Arc<AtomicBool>) 
                 s.pending_command.take(),
             )
         };
+
+        // An explicit endpoint/mode change (user click) starts the new transport
+        // NOW: drop the stale failure count so a manual switch is never punished
+        // for the previous transport's timeouts. Auto-failover counting itself
+        // is untouched.
+        if (phone_ip.clone(), connection_mode.clone()) != prev_endpoint {
+            prev_endpoint = (phone_ip.clone(), connection_mode.clone());
+            consecutive_usb_failures = 0;
+        }
 
         // Reconnect WS if IP changed
         if ws.is_some() && current_connected_ip != phone_ip {
@@ -162,6 +172,7 @@ pub fn sync_worker(state: Arc<Mutex<SharedAppState>>, running: Arc<AtomicBool>) 
                     consecutive_usb_failures = 0;
                     if let Ok(mut s) = state.lock() {
                         s.connected = true;
+                        s.control_stage = crate::core::state::ControlStage::Signaling;
                     }
                     refresh_features(&http_fallback_client, &phone_ip, &state);
                 }
@@ -173,12 +184,14 @@ pub fn sync_worker(state: Arc<Mutex<SharedAppState>>, running: Arc<AtomicBool>) 
                             consecutive_usb_failures = 0;
                             if let Ok(mut s) = state.lock() {
                                 apply_settings(&mut s, settings);
+                                s.control_stage = crate::core::state::ControlStage::Signaling;
                             }
                             refresh_features(&http_fallback_client, &phone_ip, &state);
                         }
                     } else {
                         if let Ok(mut s) = state.lock() {
                             s.connected = false;
+                            s.control_stage = crate::core::state::ControlStage::Idle;
                         }
 
                         // Auto-fallback check
@@ -189,6 +202,7 @@ pub fn sync_worker(state: Arc<Mutex<SharedAppState>>, running: Arc<AtomicBool>) 
                                 if let Ok(mut s) = state.lock() {
                                     s.phone_ip = wifi_ip;
                                     s.connection_mode = "wifi".to_string();
+                                    s.switch_generation = s.switch_generation.wrapping_add(1);
                                 }
                                 consecutive_usb_failures = 0;
                             }
@@ -198,6 +212,7 @@ pub fn sync_worker(state: Arc<Mutex<SharedAppState>>, running: Arc<AtomicBool>) 
                                 if let Ok(mut s) = state.lock() {
                                     s.phone_ip = DEFAULT_PHONE_IP.to_string();
                                     s.connection_mode = "usb".to_string();
+                                    s.switch_generation = s.switch_generation.wrapping_add(1);
                                 }
                                 consecutive_usb_failures = 0;
                             }
@@ -245,6 +260,7 @@ pub fn sync_worker(state: Arc<Mutex<SharedAppState>>, running: Arc<AtomicBool>) 
                     ws = None;
                     if let Ok(mut s) = state.lock() {
                         s.connected = false;
+                        s.control_stage = crate::core::state::ControlStage::Idle;
                     }
                 }
             }

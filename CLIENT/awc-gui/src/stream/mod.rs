@@ -4,13 +4,13 @@ pub mod rtsp;
 pub mod rtsp_client;
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::SyncSender;
+use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::core::config::{CAM_HEIGHT, CAM_WIDTH, RTSP_PORT};
-use crate::core::state::{PreviewFrame, SharedAppState};
+use crate::core::state::{PreviewFrame, SharedAppState, StreamStage};
 use crate::platform::virtual_cam::VirtualCamera;
 use crate::stream::mf::MfRtspDecoder;
 use crate::stream::rtsp::{is_keyframe_or_parameter, DecodeResult, InProcessRtspDecoder};
@@ -86,6 +86,115 @@ fn send_preview_best_effort(sender: &SyncSender<PreviewFrame>, frame: PreviewFra
     let _ = sender.try_send(frame);
 }
 
+// ---------------------------------------------------------------------------
+// Transport-switch racing (make-before-break).
+//
+// When a different endpoint is requested while a session is serving, the old
+// session keeps publishing and a background racer dials the new endpoint,
+// handshakes, and drains to its first keyframe (live edge). Cutover swaps the
+// session and feeds that keyframe straight into a fresh decoder — no teardown
+// gap, no second keyframe wait, no vcam rebuild (same phone session, same dims).
+// A completion from a superseded generation or a stale IP is dropped, so rapid
+// re-clicks resolve latest-wins with no transition lock and no ignored clicks.
+// ---------------------------------------------------------------------------
+
+/// Total budget for one race: bounded dial (~1.5 s) + handshake + keyframe wait
+/// (IDR interval ~2 s) + margin. Exceeding it means the candidate is unusable.
+const RACER_BUDGET: Duration = Duration::from_secs(6);
+/// Quiet period before re-racing a candidate that just failed, while the old
+/// session is still healthy. Prevents a hot dial loop against a dead endpoint.
+const RACER_RETRY_COOLDOWN: Duration = Duration::from_secs(10);
+
+struct RacerTarget {
+    ip: String,
+    generation: u64,
+}
+
+enum RacerOutcome {
+    Ready {
+        session: RtspSession,
+        /// The keyframe the racer stopped at. Travels with the session so the
+        /// serving thread publishes it immediately — no second keyframe wait.
+        keyframe: Vec<u8>,
+        generation: u64,
+        ip: String,
+    },
+    Failed {
+        reason: String,
+        generation: u64,
+        ip: String,
+    },
+}
+
+struct Racer {
+    target: RacerTarget,
+    rx: Receiver<RacerOutcome>,
+}
+
+fn set_stream_stage(state: &Arc<Mutex<SharedAppState>>, stage: StreamStage) {
+    if let Ok(mut s) = state.lock() {
+        s.stream_stage = stage;
+    }
+}
+
+fn spawn_racer(ip: &str, generation: u64) -> Racer {
+    let (tx, rx) = mpsc::channel();
+    let ip_owned = ip.to_string();
+    thread::spawn(move || {
+        let outcome = race_session(&ip_owned, generation);
+        // A superseded race has no receiver left; send failure just ends it.
+        let _ = tx.send(outcome);
+    });
+    Racer {
+        target: RacerTarget {
+            ip: ip.to_string(),
+            generation,
+        },
+        rx,
+    }
+}
+
+/// Dial `ip`, run the RTSP handshake, and drain NALUs until the first keyframe
+/// or the budget expires. No decoding happens here (cheap NALU-type peeks only);
+/// no vcam or preview contact — the serving session owns all outputs.
+fn race_session(ip: &str, generation: u64) -> RacerOutcome {
+    let fail = |reason: String| RacerOutcome::Failed {
+        reason,
+        generation,
+        ip: ip.to_string(),
+    };
+    let t0 = Instant::now();
+    let mut session = match RtspSession::connect(ip, RTSP_PORT) {
+        Ok(s) => s,
+        Err(e) => return fail(format!("dial: {e}")),
+    };
+    loop {
+        if t0.elapsed() >= RACER_BUDGET {
+            return fail(format!("keyframe wait exceeded {:?} budget", RACER_BUDGET));
+        }
+        match session.read_next_nalu() {
+            Ok(Some(nalu)) => {
+                if is_keyframe_or_parameter(&nalu, session.codec) {
+                    println!(
+                        "[StreamWorker] racer locked keyframe on {} after {:.1}s",
+                        ip,
+                        t0.elapsed().as_secs_f32()
+                    );
+                    return RacerOutcome::Ready {
+                        session,
+                        keyframe: nalu,
+                        generation,
+                        ip: ip.to_string(),
+                    };
+                }
+                // Pre-keyframe deltas: stale by definition, keep draining.
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(1)),
+            Err(e) => return fail(format!("read: {e}")),
+        }
+    }
+}
+
 pub fn stream_worker(
     state: Arc<Mutex<SharedAppState>>,
     running: Arc<AtomicBool>,
@@ -104,44 +213,162 @@ pub fn stream_worker(
     // and the final frame remains available after the loop exits.
     let mut nv12_buf = Vec::new();
     let mut vcam_errors: u64 = 0;
+    // Race state lives across sessions: a racer started while session A served
+    // is still adoptable after A breaks, instead of being discarded for a dial.
+    let mut racer: Option<Racer> = None;
+    let mut racer_cooldown_until: Option<Instant> = None;
+    // Last successful vcam publish, across sessions: cutover gaps are measured
+    // against it, so a gap that spans a dead session reads honestly.
+    let mut last_published = Instant::now();
+    let mut ever_live = false;
 
     while running.load(Ordering::SeqCst) {
-        let (phone_ip, is_connected) = {
+        let (phone_ip, is_connected, generation) = {
             let s = state.lock().unwrap();
-            (s.phone_ip.clone(), s.connected)
+            (s.phone_ip.clone(), s.connected, s.switch_generation)
         };
 
         if !is_connected {
+            racer = None;
+            set_stream_stage(&state, StreamStage::Idle);
             thread::sleep(Duration::from_millis(100));
             continue;
         }
 
-        println!("[StreamWorker] Connecting to native in-process RTSP session at {}:{}...", phone_ip, RTSP_PORT);
-        let mut session = match RtspSession::connect(&phone_ip, RTSP_PORT) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("[StreamWorker] RTSP connection failed: {}", e);
-                thread::sleep(Duration::from_millis(500));
-                continue;
+        // Adopt a racer that already locked the requested endpoint (the serving
+        // session died mid-race): skip the fresh dial entirely.
+        let mut adopted: Option<(RtspSession, Vec<u8>)> = None;
+        if let Some(r) = racer.take() {
+            if r.target.ip == phone_ip && r.target.generation == generation {
+                match r.rx.recv_timeout(RACER_BUDGET) {
+                    Ok(RacerOutcome::Ready { session: s, keyframe: k, .. }) => {
+                        adopted = Some((s, k));
+                    }
+                    Ok(RacerOutcome::Failed { reason, .. }) => {
+                        eprintln!("[StreamWorker] racer for {} failed: {}", phone_ip, reason);
+                    }
+                    Err(_) => {
+                        eprintln!("[StreamWorker] racer for {} produced nothing in budget", phone_ip);
+                    }
+                }
             }
-        };
+            // Else: superseded race dropped; its thread exits on send failure.
+        }
+
+        let mut cutover_nalu: Option<Vec<u8>> = None;
+        let mut waiting_for_keyframe = true;
+        let mut session;
+        if let Some((s, k)) = adopted {
+            let gap_ms = last_published.elapsed().as_millis() as u64;
+            println!("[StreamWorker] adopting racer-locked session at {}:{} (gap {}ms)...", phone_ip, RTSP_PORT, gap_ms);
+            session = s;
+            cutover_nalu = Some(k);
+            waiting_for_keyframe = false;
+            if let Ok(mut st) = state.lock() {
+                st.last_cutover_gap_ms = gap_ms;
+            }
+            set_stream_stage(&state, StreamStage::WaitingKeyframe);
+        } else {
+            set_stream_stage(&state, if ever_live { StreamStage::Reconnecting } else { StreamStage::Connecting });
+            println!("[StreamWorker] Connecting to native in-process RTSP session at {}:{}...", phone_ip, RTSP_PORT);
+            session = match RtspSession::connect(&phone_ip, RTSP_PORT) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("[StreamWorker] RTSP connection failed: {}", e);
+                    thread::sleep(Duration::from_millis(500));
+                    continue;
+                }
+            };
+            set_stream_stage(&state, StreamStage::WaitingKeyframe);
+        }
 
         println!("[StreamWorker] RTSP stream active. Initializing decoder for codec: {:?}...", session.codec);
 
         let mut decoder = ActiveDecoder::create(session.codec, &session.sps_pps);
 
+        let mut serving_ip = phone_ip.clone();
+        let mut live_announced = false;
         let mut rgba_buf = Vec::new();
         let mut last_frame_received = Instant::now();
-        let mut waiting_for_keyframe = true;
         let mut reported = (RtpStats::default(), DecoderHealth::default());
         let mut last_health_report = Instant::now();
 
         while running.load(Ordering::SeqCst) {
-            {
+            let (connected_now, want_ip, want_gen) = {
                 let s = state.lock().unwrap();
-                if !s.connected || s.phone_ip != phone_ip {
-                    println!("[StreamWorker] Disconnected or endpoint changed. Closing RTSP session.");
-                    break;
+                (s.connected, s.phone_ip.clone(), s.switch_generation)
+            };
+            if !connected_now {
+                racer = None;
+                set_stream_stage(&state, StreamStage::Idle);
+                println!("[StreamWorker] Disconnected. Closing RTSP session.");
+                break;
+            }
+            if want_ip != serving_ip {
+                // Transport switch requested: race the new endpoint for its live
+                // edge while the current session keeps publishing. No teardown,
+                // no gap, no vcam rebuild.
+                let stale_racer = match racer.as_ref() {
+                    Some(r) => r.target.ip != want_ip || r.target.generation != want_gen,
+                    None => true,
+                };
+                let cooled = racer_cooldown_until
+                    .map(|t| Instant::now() < t)
+                    .unwrap_or(false);
+                if stale_racer && !cooled {
+                    println!("[StreamWorker] switch requested ({} -> {}, gen {}): racing for keyframe, current session keeps publishing...",
+                        serving_ip, want_ip, want_gen);
+                    racer = Some(spawn_racer(&want_ip, want_gen));
+                }
+                // Poll without blocking the serving session.
+                let mut outcome: Option<RacerOutcome> = None;
+                if let Some(r) = racer.as_ref() {
+                    match r.rx.try_recv() {
+                        Ok(o) => outcome = Some(o),
+                        Err(TryRecvError::Empty) => {}
+                        Err(TryRecvError::Disconnected) => {
+                            outcome = Some(RacerOutcome::Failed {
+                                reason: "racer thread died".to_string(),
+                                generation: r.target.generation,
+                                ip: r.target.ip.clone(),
+                            });
+                        }
+                    }
+                }
+                if let Some(o) = outcome {
+                    racer = None;
+                    match o {
+                        RacerOutcome::Ready { session: new_session, keyframe, generation: g, ip: new_ip } => {
+                            if g == want_gen && new_ip == want_ip {
+                                let gap_ms = last_published.elapsed().as_millis() as u64;
+                                session = new_session;
+                                decoder = ActiveDecoder::create(session.codec, &session.sps_pps);
+                                cutover_nalu = Some(keyframe);
+                                waiting_for_keyframe = false;
+                                serving_ip = new_ip.clone();
+                                // Fresh counters on both sides; otherwise the old
+                                // baseline would trip damage reports spuriously.
+                                reported = (RtpStats::default(), DecoderHealth::default());
+                                last_health_report = Instant::now();
+                                if let Ok(mut s) = state.lock() {
+                                    s.last_cutover_gap_ms = gap_ms;
+                                }
+                                println!("[StreamWorker] cutover to {} complete: gap {}ms, codec {:?}, vcam stays {}x{}",
+                                    new_ip, gap_ms, session.codec, vcam.width, vcam.height);
+                            }
+                            // Else superseded mid-race: drop.
+                        }
+                        RacerOutcome::Failed { reason, generation: g, ip } => {
+                            if g == want_gen && ip == want_ip {
+                                eprintln!("[StreamWorker] racer for {} failed ({}); serving session unaffected, retry in {:?}...",
+                                    want_ip, reason, RACER_RETRY_COOLDOWN);
+                                racer_cooldown_until = Some(Instant::now() + RACER_RETRY_COOLDOWN);
+                            } else {
+                                println!("[StreamWorker] stale racer failure ({} gen {}) ignored; current request is {} gen {}",
+                                    ip, g, want_ip, want_gen);
+                            }
+                        }
+                    }
                 }
             }
 
@@ -178,7 +405,15 @@ pub fn stream_worker(
                 }
             }
 
-            match session.read_next_nalu() {
+            // A cutover keyframe injected by the racer flows through the exact same
+            // decode/publish path as a wire-read NALU: no second keyframe wait, no
+            // special cases downstream.
+            let nalu_read: Result<Option<Vec<u8>>, String> = if cutover_nalu.is_some() {
+                Ok(cutover_nalu.take())
+            } else {
+                session.read_next_nalu()
+            };
+            match nalu_read {
                 Ok(Some(nalu)) => {
                     last_frame_received = Instant::now();
                     let is_backlog = session.has_backlog();
@@ -245,6 +480,12 @@ pub fn stream_worker(
                                 Ok(()) => {
                                     let total_f = frames_counter.fetch_add(1, Ordering::Relaxed) + 1;
                                     frame_count_period += 1;
+                                    last_published = Instant::now();
+                                    if !live_announced {
+                                        live_announced = true;
+                                        ever_live = true;
+                                        set_stream_stage(&state, StreamStage::Live);
+                                    }
 
                                     if last_fps_time.elapsed() >= Duration::from_secs(1) {
                                         let elapsed = last_fps_time.elapsed().as_secs_f32();

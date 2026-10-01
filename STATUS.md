@@ -1,10 +1,10 @@
 # Android Webcam Project — Current Status & Issues
 
-Last updated: 2026-10-01 (evening session: screen-off design, 1440p, headless, ADB fix)
+Last updated: 2026-10-02 (Phase 1+2 transport racing, UI polish part 2, release re-verified)
 Test device: Galaxy M51 (SM-M515F, Snapdragon 730G), LineageOS 23.0 Unofficial (2025-12-25 build).
-Host connection: ADB over USB (forwards `tcp:8080` HTTP control, `tcp:8554` RTSP) + Wi-Fi ADB
-(`192.168.29.140:5555`, phone DHCP — may change) + root via `su -c` (Magisk). Phone currently
-**unplugged-capable**: USB and Wi-Fi transports stay attached simultaneously.
+Host connection: ADB over USB (forwards `tcp:8080` HTTP control, `tcp:8554` RTSP, USB-pinned via
+`adb -s`) + Wi-Fi ADB (`192.168.29.140:5555`, phone DHCP — may change) + root via `su -c` (Magisk).
+Both transports stay attached simultaneously. Phone currently foreground at 1080p30 h264.
 
 ## 0. Product direction (agreed 2026-10-01)
 
@@ -45,8 +45,32 @@ Host connection: ADB over USB (forwards `tcp:8080` HTTP control, `tcp:8554` RTSP
   `RZ8N90DNVXW tcp:8080/8554`, 567 vcam frames @ 30 fps over USB.
 - APK currently installed on the phone = **current debug build** (StreamService + back-cam
   1440p force-enable included, installed over Wi-Fi ADB).
+- **Transport-switch racing works (Phase 1+2, desktop, uncommitted at write time).**
+  Make-before-break: background racer dials the new endpoint to its keyframe while the old
+  session publishes, then atomic cutover — no teardown gap, no vcam rebuild. New
+  `tests/test_transport_switch.rs` gate (USB→WiFi→USB, 24 s live): **gap 0 ms both cutovers**,
+  100/220/207 frames per phase, keyframe locks 2.0 s / 1.0 s. Bounded 1.5 s RTSP dial,
+  failover counters reset on explicit switches (counting logic untouched), real connection
+  stages in header (`connecting…` / `waiting for keyframe…` / `reconnecting…`).
+- **UI polish part 2 (desktop, in f3a9fd2).** Sliders were re-seeded from shared state every
+  frame while the phone echoed async (thumbs snapped back mid-drag); exposure also guessed
+  −12…+12 against the M51's real −20…+20. Now: `/features` fetched on connect, bounds from
+  phone truth, drag-local thumbs committed throttled (150 ms) + flushed on release. Resolution
+  ComboBox (scrolled with 5 items) → inline list. Mode highlight + IP field follow shared
+  state after failover. ADB forward off UI thread. Preview flows even when vcam is held by
+  another app (fps counter still counts only real publishes).
 
-## 2. Fixes landed 2026-10-01 (evening session)
+## 2. Fixes landed 2026-10-02 (transport racing + UI polish 2 — uncommitted at write time)
+
+- `RtspSession::connect` uses `connect_timeout` 1.5 s (was unbounded OS timeout).
+- `ControlStage`/`StreamStage` split ownership (sync/stream workers never fight one field);
+  `switch_generation` tags explicit + failover flips, stale racers dropped latest-wins.
+- `last_cutover_gap_ms` metric in state + log line per handoff.
+- Proven as a side effect: the phone serves two parallel RTSP clients cleanly.
+- UI part 2 as listed in §1. Files: `src/stream/{mod,rtsp_client}.rs`, `src/network/sync.rs`,
+  `src/core/state.rs`, `src/ui/{app,controls,header}.rs`, `tests/test_transport_switch.rs` (new).
+
+## 2b. Fixes landed 2026-10-01 (evening session)
 
 ### Background / screen-off design (Android) — the significant one
 
@@ -86,7 +110,7 @@ See §1. Files: `src/platform/adb.rs` (`usb_device_serial`, `run_single_forward`
 console attach for release `windows_subsystem` builds, stdin-terminal guard so piped stdin
 can't EOF-kill a run), `Cargo.toml` (`Win32_System_Console`), `tests/test_live_wifi.rs` (new).
 
-## 2b. Fixes landed 2026-10-01 (earlier)
+## 2c. Fixes landed 2026-10-01 (earlier)
 
 ### Depacketizer correctness (desktop) — the significant one
 
@@ -174,19 +198,15 @@ more data" — which is why HEVC looked mysteriously broken. H.264 surfaced erro
    `/control?resolution_str=2560x1440` already works on any camera via `fromString` — only the
    advertised list + dropdowns hide it). Fix = extend force-include to front + SPS-verify.
    Deliberately not done in this session; one-line change, needs a front-cam test run.
-15. **Slow connection establishment on mode switch (P1, new).** Worst-case stack: `run_adb_forward`
-   on the UI thread (window freeze) → WS 600 ms → HTTP fallback 500 ms → 200 ms sleeps →
-   auto-fallback needs 3 dead cycles (~4 s) → RTSP `TcpStream::connect` with no explicit timeout
-   (OS-dependent stall on dead IPs) + 500 ms retry sleeps → phone CamX bring-up ~5–12 s (irreducible)
-   with no staged UI feedback. Fix direction (auto-failover behaviour itself explicitly deferred):
-   forward off UI thread, `connect_timeout` on RTSP, reset failure counters on manual switch,
-   staged status (forwarding → handshake → keyframe → live). No changes to keyframe-at-live-edge,
-   stall watchdog, or retry budgets.
-16. **Minor UI issues, both apps (P2, new — symptoms wanted).** Candidates found in code review:
-   client mode/IP fields go stale after auto-failover (local `connection_mode`/`phone_ip_input` vs
-   shared state); app permission-denied text blames the camera even when only notifications were
-   denied; app IP label is `remember`-once (stale after Wi-Fi change); new `screen_off_streaming`
-   setting has no app Settings toggle (only via `/control`).
+15. **Slow connection establishment on mode switch — IMPLEMENTED 2026-10-02 (this batch).**
+    Racing + split stages + 1.5 s dial + counter resets as designed (see §1/§2): 0 ms gaps
+    measured. Auto-failover counting untouched per deferral. Remaining: click-spam soak
+    untested, IDR-assist (Phase 3) pending encoder-API check.
+16. **Minor UI issues — sliders/dropdown FIXED 2026-10-02 (this batch), rest open.** Fixed:
+    drag-local thumbs, real `/features` bounds, inline resolution list, mode/IP desync, ADB off
+    UI thread, preview-without-vcam. Still open candidates: app permission-denied text blames
+    camera when only notifications refused; app IP label is `remember`-once (stale after Wi-Fi
+    change); `screen_off_streaming` has no app Settings toggle (only via `/control`).
 1. **HEVC verification (P0) — needs hardware.** The RTP padding and fragment-loss fixes above are
    the leading candidate explanation for the HEVC failure, but this is **unverified**: it was
    reasoned from the spec and proven by unit tests, not observed on the wire. Run
@@ -199,7 +219,10 @@ more data" — which is why HEVC looked mysteriously broken. H.264 surfaced erro
    a **network-free** harness: encoder produced 43 packets, decoder emitted 0 frames. This
    contradicts the earlier report's claim that MF "decodes chunked-file bytes of the same stream
    fine", and suggests the decoder MFT is silent generally rather than only on the live NALU feed
-   — which would explain why ~25 feed-format experiments all failed. `src/stream/mf.rs` (~1.9k
+   — which would explain why ~25 feed-format experiments all failed. Proven pre-existing 2026-10-02
+   via `git stash`: identical failure (43 packets, 0 frames) with all local changes removed, while
+   live H264 decode pulls hundreds of frames minutes apart — synthetic path or driver state, not the
+   stream pipeline. `src/stream/mf.rs` (~1.9k
    lines, 16 hot-path env-var reads) is dead weight in the release binary and should move behind a
    cargo feature before any further work. MF's *video processor* (2.27 ms 1080p→720p rescale) is
    proven and separately useful.
@@ -275,6 +298,15 @@ end-to-end rate today is decode-bound on desktop-debug.
 MF video processor: **1920x1080 NV12 → 1280x720 NV12 at 2.27 ms/frame (1.98 GB/s)** — HW rescale
 offload path is proven and available.
 
+## 5b. Measured numbers (2026-10-01/02, post-fix, release + debug)
+
+- Release headless, USB 1080p30: **410 vcam frames @ 30 fps in 15 s**, clean exit.
+- Release headless, USB 720p30 (warm): 112 frames / 4 s (~28 fps). 4K: 51 / 4 s (~13 fps,
+  desktop-decode ceiling — wire carries 30, see §5 wire probe note).
+- Transport-switch gate `test_transport_switch` (debug, USB→WiFi→USB): phases 100/220/207
+  preview frames, cutover gaps **0 ms / 0 ms**, keyframe locks 2.0 s / 1.0 s, vcam unrebuilt.
+- Phone serves two parallel RTSP clients cleanly (racer + serving session overlap).
+
 ## 6. Useful commands
 
 ```bash
@@ -292,6 +324,7 @@ cargo test --test test_fps_probe -- --ignored --nocapture --test-threads=1  # wi
 cargo test --test test_mf_matrix -- --ignored --nocapture                   # SW perf matrix (~3 min)
 cargo test --test test_mf_pipe -- --nocapture                              # MF processor checks
 cargo test --test test_live_wifi -- --ignored --nocapture                  # Wi-Fi oracle (phone on 192.168.29.140)
+cargo test --test test_transport_switch -- --ignored --nocapture           # USB→WiFi→USB race gate (both transports live, phone foreground)
 MF_ENABLE_HW=1 cargo test --test test_mf_debug -- --ignored --nocapture      # MF experiment (silent)
 
 # Headless desktop client (no GUI window):

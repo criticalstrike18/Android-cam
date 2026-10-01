@@ -37,8 +37,11 @@ pub fn render_header(ctx: &egui::Context, state: &SharedAppState) {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.spacing_mut().item_spacing = Vec2::new(10.0, 0.0);
 
-                    // Telemetry badge
-                    if state.connected && state.fps > 0.0 {
+                    // Telemetry badge: live FPS, or the real connection stage while
+                    // establishing (connecting / waiting for keyframe / reconnecting).
+                    // A bare "Phone Offline → Phone Connected" flip hides a ~10 s
+                    // CamX bring-up; the stage tells the truth about the wait.
+                    if state.connected && state.fps > 0.0 && state.stream_stage == crate::core::state::StreamStage::Live {
                         let frame = egui::Frame::none()
                             .fill(colors::BADGE_BG)
                             .stroke(Stroke::new(1.0_f32, colors::BORDER_SUBTLE))
@@ -51,6 +54,21 @@ pub fn render_header(ctx: &egui::Context, state: &SharedAppState) {
                                     .size(11.0)
                                     .strong()
                                     .color(colors::ACCENT_PRIMARY),
+                            );
+                        });
+                    } else if state.connected {
+                        let frame = egui::Frame::none()
+                            .fill(colors::BADGE_BG)
+                            .stroke(Stroke::new(1.0_f32, colors::BORDER_SUBTLE))
+                            .rounding(Rounding::same(12.0))
+                            .inner_margin(Margin::symmetric(10.0, 3.0));
+
+                        frame.show(ui, |ui| {
+                            ui.label(
+                                egui::RichText::new(format!("{}…", state.stream_stage.as_str()))
+                                    .size(11.0)
+                                    .strong()
+                                    .color(colors::TEXT_SECONDARY),
                             );
                         });
                     }

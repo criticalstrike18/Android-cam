@@ -60,6 +60,45 @@ pub struct PreviewFrame {
     pub rgba: Vec<u8>,
 }
 
+/// Control-plane (HTTP/WS settings sync) state. Owned exclusively by sync_worker.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum ControlStage {
+    /// No reachable control endpoint.
+    #[default]
+    Idle,
+    /// WebSocket or HTTP settings channel is up.
+    Signaling,
+}
+
+/// Media-plane (RTSP/decode/publish) state. Owned exclusively by stream_worker.
+/// Split from ControlStage so the two workers never fight over one field.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum StreamStage {
+    /// Nothing dialed.
+    #[default]
+    Idle,
+    /// Dialing the RTSP endpoint (first attempt or cold start).
+    Connecting,
+    /// Session up, discarding pre-keyframe backlog at the live edge.
+    WaitingKeyframe,
+    /// Publishing frames to vcam + preview.
+    Live,
+    /// A live session broke and is being re-established (or raced).
+    Reconnecting,
+}
+
+impl StreamStage {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            StreamStage::Idle => "idle",
+            StreamStage::Connecting => "connecting",
+            StreamStage::WaitingKeyframe => "waiting for keyframe",
+            StreamStage::Live => "live",
+            StreamStage::Reconnecting => "reconnecting",
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct SharedAppState {
     pub phone_ip: String,
@@ -84,6 +123,17 @@ pub struct SharedAppState {
     pub source_h: u32,
     pub pending_command: Option<String>,
     pub features: PhoneFeatures,
+    pub control_stage: ControlStage,
+    pub stream_stage: StreamStage,
+    /// Bumped on every explicit transport/cell switch request. The stream worker
+    /// tags its background racer with the generation it saw; a completion from a
+    /// superseded generation is dropped, so click-spam resolves latest-wins with
+    /// no transition lock and no ignored clicks.
+    pub switch_generation: u64,
+    /// Wall time between the last frame published by the old session and the
+    /// first frame published by the new one at cutover. The canary for handoff
+    /// regressions: make-before-break should hold this near one frame interval.
+    pub last_cutover_gap_ms: u64,
 }
 
 impl Default for SharedAppState {
@@ -117,6 +167,10 @@ impl Default for SharedAppState {
             source_h: 720,
             pending_command: None,
             features: PhoneFeatures::default(),
+            control_stage: ControlStage::Idle,
+            stream_stage: StreamStage::Idle,
+            switch_generation: 0,
+            last_cutover_gap_ms: 0,
         }
     }
 }

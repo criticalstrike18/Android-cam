@@ -115,6 +115,7 @@ pub fn render_controls(
                 let mut s = state_arc.lock().unwrap();
                 s.phone_ip = DEFAULT_PHONE_IP.to_string();
                 s.connection_mode = "usb".to_string();
+                s.switch_generation = s.switch_generation.wrapping_add(1);
                 drop(s);
                 spawn_adb_forward(forward_status);
             }
@@ -127,6 +128,7 @@ pub fn render_controls(
                 }
                 s.phone_ip = phone_ip_input.clone();
                 *last_seen_phone_ip = phone_ip_input.clone();
+                s.switch_generation = s.switch_generation.wrapping_add(1);
                 *status_msg = format!("Connecting to {}…", phone_ip_input);
             }
         });
@@ -208,6 +210,7 @@ pub fn render_controls(
                     let mut s = state_arc.lock().unwrap();
                     s.phone_ip = clean_ip.clone();
                     s.wifi_ip = clean_ip.clone();
+                    s.switch_generation = s.switch_generation.wrapping_add(1);
                     *last_seen_phone_ip = clean_ip.clone();
                     *status_msg = format!("Connecting to {}…", clean_ip);
                 }
