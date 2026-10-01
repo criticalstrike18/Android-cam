@@ -10,7 +10,7 @@ Open-source (GPL-3.0)
 
 The system consists of two tightly coupled, high-performance components:
 
-- 📱 **AWA (Android Webcam App)**: Native Kotlin Android application using Camera2 and MediaCodec hardware acceleration. Streams H.264 or H.265 over RTSP (port 8554), with an HTTP/WebSocket control plane on port 8080.
+- 📱 **AWA (Android Webcam App)**: Native Kotlin Android application using Camera2 and MediaCodec hardware acceleration. Streams H.264 over RTSP (port 8554), with an HTTP/WebSocket control plane on port 8080. (H.265 exists on the phone encoder but is experimental desktop-side and not supported until the H.264 path is productionized — see `STATUS.md` §0.)
 - 💻 **AWC-GUI (Pure Rust Desktop Client)**: Ultra-fast native client written in **Rust (`egui` / `eframe`)** featuring a modern **Shadcn-inspired Dark Theme**, fully responsive maximized video viewport, integrated OpenH264 decoder, and silent direct memory output to **OBS Virtual Camera** (DirectShow).
 
 ---

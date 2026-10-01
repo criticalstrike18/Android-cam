@@ -210,6 +210,22 @@ pub fn stream_worker(
                         is_backlog,
                     ) {
                         Ok(Some(res)) => {
+                            // The virtual camera publishes at the stream's native
+                            // resolution. When the source changes (first frames,
+                            // or a mid-stream resolution switch), rebuild it so OBS
+                            // receives full-resolution frames. At equal dimensions
+                            // the scaler takes its memcpy fast path, so native
+                            // output is cheaper than a fixed downscale.
+                            if res.src_w != vcam.width || res.src_h != vcam.height {
+                                vcam.recreate(res.src_w, res.src_h, 30.0);
+                                if let Ok(mut s) = state.lock() {
+                                    s.virtual_cam_active = vcam.is_active();
+                                }
+                                // Skip this transitional frame; buffers are still
+                                // sized for the old dimensions and self-correct on
+                                // the next decode.
+                                continue;
+                            }
                             // Publish to the virtual camera, and only count the
                             // frame as sent when that actually succeeded. Otherwise
                             // the FPS overlay claims success with no camera present.

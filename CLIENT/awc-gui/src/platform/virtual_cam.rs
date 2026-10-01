@@ -105,15 +105,49 @@ impl VirtualCamera {
         let backends = available_backends();
         println!("[VirtualCam] Available virtual camera backends: {:?}", backends);
 
+        let mut cam = Self {
+            camera: None,
+            width,
+            height,
+        };
+        cam.build_camera(fps);
+        cam
+    }
+
+    /// Rebuilds the camera at new dimensions without re-running the driver
+    /// installation check (no repeated `reg query`, no repeat UAC risk).
+    /// Called when the stream's native resolution changes so the virtual camera
+    /// publishes full-resolution frames instead of a fixed downscale.
+    pub fn recreate(&mut self, width: u32, height: u32, fps: f64) {
+        if self.width == width && self.height == height {
+            return;
+        }
+        println!(
+            "[VirtualCam] Output resolution change {}x{} -> {}x{}; rebuilding virtual camera.",
+            self.width, self.height, width, height
+        );
+        // Drop the old camera BEFORE building the new one: the OBS driver holds
+        // the device exclusively, so building while the old instance is alive
+        // always fails with "already in use".
+        self.camera = None;
+        self.width = width;
+        self.height = height;
+        self.build_camera(fps);
+        if self.camera.is_none() {
+            eprintln!("[VirtualCam] Rebuild failed; publishing paused until the driver recovers.");
+        }
+    }
+
+    fn build_camera(&mut self, fps: f64) {
         // Build with native NV12 format for zero-overhead direct shared-memory publishing
-        let camera = match Camera::builder(width, height, fps)
+        self.camera = match Camera::builder(self.width, self.height, fps)
             .format(PixelFormat::NV12)
             .build()
         {
             Ok(c) => {
                 println!(
                     "[VirtualCam] Virtual camera active via OBS Virtual Camera / Media Foundation ({}x{} @ {:.1} fps, native NV12)",
-                    width, height, fps
+                    self.width, self.height, fps
                 );
                 Some(c)
             }
@@ -125,12 +159,6 @@ impl VirtualCamera {
                 None
             }
         };
-
-        Self {
-            camera,
-            width,
-            height,
-        }
     }
 
     /// Zero-overhead native NV12 frame publishing directly to OBS virtual camera shared memory.

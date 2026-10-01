@@ -4,6 +4,17 @@ Last updated: 2026-10-01
 Test device: Galaxy M51 (SM-M515F, Snapdragon 730G), LineageOS 23.0 Unofficial (2025-12-25 build).
 Host connection: ADB over USB (forwards `tcp:8080` HTTP control, `tcp:8554` RTSP) + root via `su -c` (Magisk).
 
+## 0. Product direction (agreed 2026-10-01)
+
+- **Supported codec: H.264 only.** HEVC is **experimental** and explicitly not a priority until the
+  H.264 path is productionized (reliable 30 fps output, call-grade stability, battery validated).
+  The H.265 depacketizer, error surfacing, and rebuild logic stay in the tree as infrastructure,
+  but HEVC issues (§3.1) are backlog, not blockers.
+- **Transport bar: USB primary, Wi-Fi must carry 1440p30 minimum.** 4K-over-Wi-Fi is nice-to-have;
+  1440p30 over Wi-Fi is the requirement.
+- Target: phone as facecam (720p/1080p/1440p/4K @ 30 fps final output) for OBS/Meet/Zoom on
+  Windows, minimal heat and battery, lighter than a Windows webcam pipeline.
+
 > **Read this first.** The 2026-09-30 status report prioritised Media Foundation hardware
 > decode as P0 and RTP padding as P2. That ordering was inverted. RTP padding turned out to be
 > a real corruption bug and the most likely cause of the HEVC failure, while MF hardware decode
